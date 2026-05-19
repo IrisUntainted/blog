@@ -1,0 +1,10 @@
+{
+  "workspace": "iris-network",
+  "publish_date": "2026-05-19",
+  "revision": "iris-network",
+  "files": [
+    "main.typ",
+    "network-diagram.typ"
+  ],
+  "generated_at": "2026-05-19T20:09:39"
+}
