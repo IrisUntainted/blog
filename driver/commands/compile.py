@@ -38,7 +38,7 @@ from .utils import (
     sources_hash,
 )
 
-_SITE_TITLE = "Blog"
+_SITE_TITLE = "Fragmenta Iridis"
 _FORM_HOOKS_FILENAME = "form-hooks.js"
 
 
