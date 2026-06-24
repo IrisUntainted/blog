@@ -1,7 +1,7 @@
 {
   "title": "Test Screen Reader Text",
   "subtitle": null,
-  "description": "A link to the homepage should be announced as link text, not as a raw URL.",
-  "source_hash": "f08717",
-  "generated_at": "2026-05-19 20:23:37"
+  "description": "Posts on this blog are compiled to SVG pages, which provides a consistent visual appearance but leaves assistive technology with nothing to announce.",
+  "source_hash": "d5ef7e",
+  "generated_at": "2026-06-24 11:52:57"
 }

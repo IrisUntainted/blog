@@ -2,7 +2,7 @@
 #import "../../driver/template.typ": theme_color
 
 #let ink = rgb("#222222")
-#let _ring-names = (
+#let _ring-names = ( 
   "dls-01", "ams-01", "par-01", "tyo-01", "hkg-01", "lax-02", "lax-01",
 )
 #let _ring-radius = 3.6

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>Blog</title>
+    <title>Fragmenta Iridis</title>
     <link>https://blog.owo.li/</link>
     <description>It is unlikely that there will be many posts here.</description>
     <language>en-us</language>
@@ -26,7 +26,7 @@
       <link>https://blog.owo.li/posts/2026-04-17/test-screen-reader-text/index.html</link>
       <guid isPermaLink="true">https://blog.owo.li/posts/2026-04-17/test-screen-reader-text/index.html</guid>
       <pubDate>Fri, 17 Apr 2026 00:00:00 +0000</pubDate>
-      <description>A link to the homepage should be announced as link text, not as a raw URL.</description>
+      <description>Posts on this blog are compiled to SVG pages, which provides a consistent visual appearance but leaves assistive technology with nothing to announce.</description>
     </item>
     <item>
       <title>Preload SVG Sprites</title>
@@ -47,14 +47,14 @@
       <link>https://blog.owo.li/posts/2026-04-08/kioubit-crypto-ch2p1-writeup/index.html</link>
       <guid isPermaLink="true">https://blog.owo.li/posts/2026-04-08/kioubit-crypto-ch2p1-writeup/index.html</guid>
       <pubDate>Wed, 08 Apr 2026 00:00:00 +0000</pubDate>
-      <description>Note: This challenge is hosted on the dn42 network.</description>
+      <description>Challenge: http://kioubit.dn42/challenge/ch2/</description>
     </item>
     <item>
       <title>Test Code Block Copy</title>
       <link>https://blog.owo.li/posts/2026-04-07/test-code-block-copy/index.html</link>
       <guid isPermaLink="true">https://blog.owo.li/posts/2026-04-07/test-code-block-copy/index.html</guid>
       <pubDate>Tue, 07 Apr 2026 00:00:00 +0000</pubDate>
-      <description>To try it out, click any inline code snippet above or the code block below to copy the exact source text to your clipboard:</description>
+      <description>Since this is a programmer's blog, posts will inevitably contain code.</description>
     </item>
     <item>
       <title>Inline Link Test</title>
