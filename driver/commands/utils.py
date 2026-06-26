@@ -158,6 +158,7 @@ class DriverWebAssets:
     clipboard_script_path: str
     visual_script_path: str
     form_script_path: str
+    friends_script_path: str
     inline_style: str
     inline_script: str
 
@@ -201,6 +202,7 @@ class HtmlBuildConfig:
     form_hooks: str = ""
     primary_pages_wrapper_class: str = ""
     extra_pages_html: str = ""
+    load_friends_script: bool = False
 
 
 @dataclass(frozen=True)
@@ -259,7 +261,31 @@ def _append_svg_class(attrs: str, class_name: str) -> str:
     return f'{attrs} class="{class_name}"'
 
 
-def _inject_svg_theme_classes(svg_data: str) -> str:
+def _custom_theme_color_class(light_hex: str) -> str:
+    return f"tc-{light_hex.lstrip('#')}"
+
+
+def _build_custom_theme_maps(
+    custom_colors: List[Tuple[str, str]],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    fill_map: Dict[str, str] = {}
+    stroke_map: Dict[str, str] = {}
+    for light, _dark in custom_colors:
+        cls = _custom_theme_color_class(light)
+        fill_map[light] = cls
+        stroke_map[light] = f"{cls}-s"
+    return fill_map, stroke_map
+
+
+def _inject_svg_theme_classes(
+    svg_data: str,
+    custom_colors: Optional[List[Tuple[str, str]]] = None,
+) -> str:
+    extra_fill: Dict[str, str] = {}
+    extra_stroke: Dict[str, str] = {}
+    if custom_colors:
+        extra_fill, extra_stroke = _build_custom_theme_maps(custom_colors)
+
     def _rewrite_tag(match: re.Match) -> str:
         tag = match.group(1)
         attrs = match.group(2)
@@ -272,15 +298,23 @@ def _inject_svg_theme_classes(svg_data: str) -> str:
         fill_match = re.search(r'\sfill="([^"]+)"', attrs, flags=re.IGNORECASE)
         if fill_match:
             fill_value = fill_match.group(1).strip().lower()
-            if fill_value in _SVG_THEME_FILL_CLASS_MAP:
-                classes.append(_SVG_THEME_FILL_CLASS_MAP[fill_value])
+            cls = (
+                _SVG_THEME_FILL_CLASS_MAP.get(fill_value)
+                or extra_fill.get(fill_value)
+            )
+            if cls:
+                classes.append(cls)
                 attrs_to_remove.add("fill")
 
         stroke_match = re.search(r'\sstroke="([^"]+)"', attrs, flags=re.IGNORECASE)
         if stroke_match:
             stroke_value = stroke_match.group(1).strip().lower()
-            if stroke_value in _SVG_THEME_STROKE_CLASS_MAP:
-                classes.append(_SVG_THEME_STROKE_CLASS_MAP[stroke_value])
+            cls = (
+                _SVG_THEME_STROKE_CLASS_MAP.get(stroke_value)
+                or extra_stroke.get(stroke_value)
+            )
+            if cls:
+                classes.append(cls)
                 attrs_to_remove.add("stroke")
 
         if not classes:
@@ -301,12 +335,37 @@ def _inject_svg_theme_classes(svg_data: str) -> str:
     return re.sub(r"<([A-Za-z][\w:.-]*)([^>]*)>", _rewrite_tag, svg_data)
 
 
-def _inject_svg_theme_style(svg_data: str) -> str:
+def _inject_svg_theme_style(
+    svg_data: str,
+    custom_colors: Optional[List[Tuple[str, str]]] = None,
+) -> str:
     if 'id="driver-theme-style"' in svg_data:
         return svg_data
+    style = _SVG_THEME_STYLE
+    if custom_colors:
+        class_rules: List[str] = []
+        dark_vars: List[str] = []
+        for light, dark in custom_colors:
+            cls = _custom_theme_color_class(light)
+            var = f"--svg-{cls}"
+            class_rules.append(
+                f".{cls} {{ fill: var({var}, {light}) !important; }}"
+            )
+            class_rules.append(
+                f".{cls}-s {{ stroke: var({var}, {light}) !important; }}"
+            )
+            dark_vars.append(f"    {var}: {dark};")
+        style = style.replace(
+            "\n  }\n}\na[href^",
+            "\n" + "\n".join(dark_vars) + "\n  }\n}\na[href^",
+        )
+        style = style.replace(
+            "a[href^=\"#cond=\"]",
+            "\n".join(class_rules) + "\na[href^=\"#cond=\"]",
+        )
     return re.sub(
         r"(<svg\b[^>]*>)",
-        rf"\1{_SVG_THEME_STYLE}",
+        rf"\1{style}",
         svg_data,
         count=1,
     )
@@ -360,7 +419,7 @@ def first_desc(
         block_tag = (block_match.group(1) or "").lower()
         block_attrs = block_match.group(2) or ""
         if block_tag == "p" and re.search(
-            r'\bclass\s*=\s*"[^"]*\bsubtitle\b', block_attrs
+            r'\bclass\s*=\s*"[^"]*\b(?:subtitle|post-nav)\b', block_attrs
         ):
             continue
 
@@ -785,7 +844,7 @@ def _remove_legacy_root_js_files(webroot_dir: str) -> int:
 
     removed_count = 0
     for filename in os.listdir(webroot_dir):
-        if not re.fullmatch(r"(?:clipboard|visual|form)(?:\.[^.]+)?(?:\.min)?\.js", filename):
+        if not re.fullmatch(r"(?:clipboard|visual|form|friends)(?:\.[^.]+)?(?:\.min)?\.js", filename):
             continue
         target_path = os.path.join(webroot_dir, filename)
         if os.path.isfile(target_path):
@@ -809,6 +868,7 @@ def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
     clipboard_src_path = os.path.join(driver_dir, "clipboard.js")
     visual_src_path = os.path.join(driver_dir, "visual.js")
     form_src_path = os.path.join(driver_dir, "form.js")
+    friends_src_path = os.path.join(driver_dir, "friends.js")
 
     with open(stylesheet_src_path, "r", encoding="utf-8") as f:
         stylesheet_source = f.read().strip() + "\n"
@@ -818,6 +878,8 @@ def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
         visual_source = f.read()
     with open(form_src_path, "r", encoding="utf-8") as f:
         form_source = f.read()
+    with open(friends_src_path, "r", encoding="utf-8") as f:
+        friends_source = f.read()
 
     stylesheet_asset_path = _write_hashed_asset(
         asset_dir=assets_dir,
@@ -843,6 +905,12 @@ def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
         suffix=".min.js",
         content=_minify_js_source(form_source),
     )
+    friends_asset_path = _write_hashed_asset(
+        asset_dir=assets_dir,
+        prefix="friends",
+        suffix=".min.js",
+        content=_minify_js_source(friends_source),
+    )
 
     inline_style_src_path = os.path.join(driver_dir, "inline-style.css")
     inline_script_src_path = os.path.join(driver_dir, "inline-script.js")
@@ -857,6 +925,7 @@ def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
         clipboard_script_path=clipboard_asset_path,
         visual_script_path=visual_asset_path,
         form_script_path=form_asset_path,
+        friends_script_path=friends_asset_path,
         inline_style=_minify_css_source(inline_style_source),
         inline_script=_minify_js_source(inline_script_source),
     )
@@ -2157,6 +2226,27 @@ def _resolve_post_index_title_from_href(
     return _read_html_title(target_path)
 
 
+EXTERNAL_LINK_ATTRS = ' target="_blank" rel="noopener noreferrer"'
+
+
+def is_external_href(href: str, site_base_url: Optional[str]) -> bool:
+    s = (href or "").strip()
+    if not s or s.startswith("#"):
+        return False
+    parsed = urlparse(s)
+    scheme = parsed.scheme.lower()
+    if not scheme:
+        return s.startswith("//")
+    if scheme not in {"http", "https"}:
+        return True
+    if not site_base_url:
+        return True
+    site = urlparse(site_base_url)
+    if not parsed.hostname or not site.hostname:
+        return True
+    return parsed.hostname.lower() != site.hostname.lower()
+
+
 def _normalize_site_href_for_label(
     href: str,
     site_base_url: Optional[str],
@@ -2328,6 +2418,12 @@ def _inject_svg_anchor_accessibility(
         )
         if not has_explicit_name:
             rewritten_attrs += f' aria-label="{html.escape(label, quote=True)}"'
+
+        if (
+            is_external_href(href or "", site_base_url)
+            and not re.search(r"\s+rel\s*=", attrs, flags=re.IGNORECASE)
+        ):
+            rewritten_attrs += ' rel="noopener noreferrer"'
 
         rewritten_body = body
         has_title_node = re.search(r"<title\b[^>]*>", body, flags=re.IGNORECASE) is not None
@@ -2550,6 +2646,97 @@ def _mark_svg_cond_groups(svg_content: str) -> str:
     return "".join(parts)
 
 
+def extract_friend_card_symbols(svg_path: str) -> int:
+    # Friend cards render as <g clip-path="url(#X)" transform="translate(X Y)">…</g>
+    # (the clip-path comes from the card's `clip: true` block). Lift each into a
+    # <symbol id="card-N"> in <defs> and replace the inline group with a lightweight
+    # <use class="friend-card" href="#card-N" x y/>, so JS can shuffle cards by
+    # reassigning hrefs without moving layout. Runs after compile_html (svgo already
+    # done), so emitted ids/attributes are final.
+    with open(svg_path, "r", encoding="utf-8") as f:
+        data = f.read()
+
+    open_re = re.compile(
+        r'<g(?P<attrs>[^>]*\bclip-path="url\(#(?P<clip>[^"]+)\)"[^>]*)>'
+    )
+    tag_re = re.compile(r"<g\b[^>]*>|</g>")
+
+    cards: List[Dict[str, object]] = []
+    for m in open_re.finditer(data):
+        depth = 1
+        close_end: Optional[int] = None
+        for sm in tag_re.finditer(data, m.end()):
+            if sm.group().startswith("</g>"):
+                depth -= 1
+                if depth == 0:
+                    close_end = sm.end()
+                    break
+            else:
+                depth += 1
+        if close_end is None:
+            continue
+        inner = data[m.end():close_end - len("</g>")]
+        tf = re.search(
+            r'\btransform="translate\(([-0-9.]+)\s+([-0-9.]+)\)"', m.group("attrs")
+        )
+        if not tf:
+            continue
+        cards.append(
+            {
+                "open_start": m.start(),
+                "close_end": close_end,
+                "inner": inner,
+                "clip": m.group("clip"),
+                "x": tf.group(1),
+                "y": tf.group(2),
+            }
+        )
+
+    if not cards:
+        return 0
+
+    symbols: List[str] = []
+    spans: List[Tuple[int, int, str]] = []
+    for i, card in enumerate(cards):
+        symbol_id = f"card-{i}"
+        symbols.append(
+            f'<symbol id="{symbol_id}"><g clip-path="url(#{card["clip"]})">'
+            f'{card["inner"]}</g></symbol>'
+        )
+        spans.append(
+            (
+                card["open_start"],
+                card["close_end"],
+                f'<use class="friend-card" href="#{symbol_id}"'
+                f' x="{card["x"]}" y="{card["y"]}"/>',
+            )
+        )
+
+    out = data
+    for open_start, close_end, use_tag in sorted(spans, key=lambda s: s[0], reverse=True):
+        out = out[:open_start] + use_tag + out[close_end:]
+
+    defs_close = out.rfind("</defs>")
+    blob = "".join(symbols)
+    if defs_close == -1:
+        out = out.replace("</svg>", f"<defs>{blob}</defs></svg>", 1)
+    else:
+        out = out[:defs_close] + blob + out[defs_close:]
+
+    # Cards are hidden until friends.js reveals them post-shuffle, so the page
+    # never flashes the default (file-order) cards on load.
+    svg_tag_end = out.find(">", out.find("<svg")) + 1
+    out = (
+        out[:svg_tag_end]
+        + "<style>use.friend-card{visibility:var(--friend-cards,hidden)}</style>"
+        + out[svg_tag_end:]
+    )
+
+    with open(svg_path, "w", encoding="utf-8") as f:
+        f.write(out)
+    return len(cards)
+
+
 def patch_svg_file(
     src_path: str,
     dst_path: str,
@@ -2560,6 +2747,7 @@ def patch_svg_file(
     asset_hash: Optional[str] = None,
     image_asset_names: Optional[Dict[str, str]] = None,
     action_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+    custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
 ) -> None:
     with open(src_path, "r", encoding="utf-8") as svg_file:
         svg_data = svg_file.read()
@@ -2612,6 +2800,8 @@ def patch_svg_file(
 
         if re.search(r"\s+target\s*=\s*['\"][^'\"]*['\"]", attrs):
             return f"<a{attrs}>"
+        if is_external_href(_extract_anchor_href(attrs) or "", site_base_url):
+            return f"<a{EXTERNAL_LINK_ATTRS}{attrs}>"
         return f'<a target="_top"{attrs}>'
 
     svg_data = re.sub(r"<a([^>]*)>", _rewrite_anchor_tag, svg_data)
@@ -2621,8 +2811,8 @@ def patch_svg_file(
         site_base_url=site_base_url,
         action_metadata=action_metadata,
     )
-    svg_data = _inject_svg_theme_classes(svg_data)
-    svg_data = _inject_svg_theme_style(svg_data)
+    svg_data = _inject_svg_theme_classes(svg_data, custom_theme_colors)
+    svg_data = _inject_svg_theme_style(svg_data, custom_theme_colors)
     svg_data = _mark_svg_cond_groups(svg_data)
 
     if (
@@ -2663,6 +2853,18 @@ def _build_open_graph_metadata(
     return "\n    ".join(metadata_lines)
 
 
+def _svg_aspect_ratio(svg_path: str) -> Optional[str]:
+    """CSS aspect-ratio (e.g. "498.9 / 708.66") from an SVG's viewBox, so each
+    page <object> reserves its true height before the SVG finishes loading."""
+    with open(svg_path, "r", encoding="utf-8") as svg_file:
+        head = svg_file.read(8192)
+    match = re.search(r'<svg\b[^>]*?\bviewBox\s*=\s*["\']([^"\']+)["\']', head)
+    if not match:
+        return None
+    _, _, width, height = match.group(1).split()
+    return f"{width} / {height}"
+
+
 def _process_svg_set(
     *,
     source_dir: str,
@@ -2679,6 +2881,7 @@ def _process_svg_set(
     glyph_scope_key: str,
     asset_context: DriverAssetContext,
     page_count_limit: Optional[int] = None,
+    custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[List[str], Optional[str], Dict[str, str]]:
     svg_files = sorted(
         f
@@ -2718,6 +2921,7 @@ def _process_svg_set(
             asset_hash=asset_hash,
             image_asset_names=image_asset_names,
             action_metadata=action_metadata,
+            custom_theme_colors=custom_theme_colors,
         )
         patched_svg_paths.append(dst_path)
         page_titles.append(title_format.replace("{i}", str(i)))
@@ -2748,8 +2952,10 @@ def _process_svg_set(
     page_links: List[str] = []
     for svg_path, page_title in zip(patched_svg_paths, page_titles):
         page_href = f"./{WEB_ASSETS_DIR_NAME}/{_build_asset_rel_path(svg_path)}"
+        aspect_ratio = _svg_aspect_ratio(svg_path)
+        style_attr = f' style="aspect-ratio: {aspect_ratio}"' if aspect_ratio else ""
         page_links.append(
-            f'<object class="page" type="image/svg+xml" data-src="{html.escape(page_href, quote=True)}" '
+            f'<object class="page" type="image/svg+xml" data-src="{html.escape(page_href, quote=True)}"{style_attr} '
             f'title="{page_title}"></object>'
         )
 
@@ -2763,6 +2969,7 @@ def build_html_from_svgs(
     pdf_path: Optional[str] = None,
     asset_hash: Optional[str] = None,
     action_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+    custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     with open(config.template_path, "r", encoding="utf-8") as f:
         template = f.read()
@@ -2789,6 +2996,7 @@ def build_html_from_svgs(
         glyph_scope_key=glyph_scope,
         asset_context=config.asset_context,
         page_count_limit=page_count if page_count else None,
+        custom_theme_colors=custom_theme_colors,
     )
 
     if config.image_source_dir is not None and asset_hash is not None:
@@ -2883,6 +3091,14 @@ def build_html_from_svgs(
     else:
         form_tag = ""
     index_content = index_content.replace("{{FORM_SCRIPT}}", form_tag)
+
+    friends_script_tag = ""
+    if config.load_friends_script:
+        friends_src = build_root_asset_href(
+            config.asset_context.web_assets.friends_script_path
+        )
+        friends_script_tag = f'<script defer src="{html.escape(friends_src)}"></script>'
+    index_content = index_content.replace("{{FRIENDS_SCRIPT}}", friends_script_tag)
 
     form_hooks_tag = ""
     if has_form_inputs and config.form_hooks:
@@ -3015,6 +3231,26 @@ def compile_html(request: CompileBuildRequest) -> str:
             "tabindex": str(item.get("tabindex") or ""),
         }
 
+    custom_colors: List[Tuple[str, str]] = []
+    seen_colors: Set[str] = set()
+    for node in _query_nodes_from_source(
+        source_content=request.source_bytes,
+        query_root=os.getcwd(),
+        selector="<driver-theme-color>",
+        inputs=svg_in,
+    ):
+        item = node.get("value")
+        if not isinstance(item, dict):
+            continue
+        light = item.get("light")
+        dark = item.get("dark")
+        if not isinstance(light, str) or not isinstance(dark, str):
+            continue
+        key = light.lower()
+        if key not in seen_colors:
+            seen_colors.add(key)
+            custom_colors.append((key, dark.lower()))
+
     html_config = request.html
     if request.mobile is not None:
         html_dir = os.path.dirname(
@@ -3035,6 +3271,7 @@ def compile_html(request: CompileBuildRequest) -> str:
             shared_glyphs=request.html.shared_glyphs,
             glyph_scope_key=request.mobile.glyph_scope_key,
             asset_context=request.html.asset_context,
+            custom_theme_colors=custom_colors or None,
         )
         mobile_html = (
             f'<div class="{request.mobile.wrapper_class}">\n'
@@ -3054,4 +3291,5 @@ def compile_html(request: CompileBuildRequest) -> str:
         pdf_path=pdf_path,
         asset_hash=request.asset_hash,
         action_metadata=action_meta,
+        custom_theme_colors=custom_colors or None,
     )

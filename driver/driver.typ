@@ -15,21 +15,7 @@
 
 #let subtitle = none
 
-#show image: it => {
-  if _driver_is_svg_export() {
-    layout(size => {
-      let dims = measure(block(width: size.width)[
-        #show image: img => img
-        #it
-      ])
-      let alt_part = if it.alt != none { "?alt=" + it.alt } else { "" }
-      link("driver-image://" + it.source + alt_part,
-           rect(width: dims.width, height: dims.height, fill: none, stroke: none))
-    })
-  } else {
-    it
-  }
-}
+#show image: driver_image_show
 
 // IMPORT_MAIN
 

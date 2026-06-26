@@ -4,30 +4,38 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from .utils import (
+    _extract_typst_table_rows,
+    _flatten_query_text,
+    EXTERNAL_LINK_ATTRS,
+    is_external_href,
+    make_raw_copy_id,
+)
+
 _EMPTY_COND_SPAN_RE = re.compile(
     r'(<span data-cond-id="[^"]+"'
     r' data-cond-branch="[^"]+">)'
     r"\s*(</span>)"
 )
 
-from .utils import (
-    _extract_typst_table_rows,
-    _flatten_query_text,
-    make_raw_copy_id,
-)
-
 
 def _embed_links_in_text(
     text: str,
     links: List[Tuple[str, str]],
+    site_base_url: Optional[str] = None,
 ) -> str:
-    """Embed scoped links into an HTML text fragment."""
     for href, label in links:
         escaped_label = html.escape(label)
         if escaped_label not in text:
             continue
         safe_href = html.escape(href, quote=True)
-        anchor = f'<a href="{safe_href}" tabindex="-1">{escaped_label}</a>'
+        target_attrs = (
+            EXTERNAL_LINK_ATTRS if is_external_href(href, site_base_url) else ""
+        )
+        anchor = (
+            f'<a href="{safe_href}"{target_attrs} tabindex="-1">'
+            f"{escaped_label}</a>"
+        )
         idx = text.find(escaped_label)
         if idx == -1:
             continue
@@ -277,6 +285,7 @@ def _collect_emphasis_text(
 def flatten_doc_node_to_html(
     node: Any,
     emphasis_map: Optional[Dict[str, str]] = None,
+    site_base_url: Optional[str] = None,
 ) -> str:
     """Recursively convert a Typst JSON content node to an HTML string.
 
@@ -286,7 +295,7 @@ def flatten_doc_node_to_html(
     if isinstance(node, str):
         return html.escape(node)
     if isinstance(node, list):
-        return "".join(flatten_doc_node_to_html(item, emphasis_map) for item in node)
+        return "".join(flatten_doc_node_to_html(item, emphasis_map, site_base_url) for item in node)
     if isinstance(node, dict):
         func = node.get("func")
         if func == "space":
@@ -297,7 +306,7 @@ def flatten_doc_node_to_html(
             c = '"' if node.get("double") else "'"
             return html.escape(c)
         if func == "styled" and emphasis_map:
-            inner = flatten_doc_node_to_html(node.get("child", ""), emphasis_map)
+            inner = flatten_doc_node_to_html(node.get("child", ""), emphasis_map, site_base_url)
             inner_text = _flatten_query_text(node.get("child", "")).strip()
             tag = emphasis_map.get(inner_text)
             if tag:
@@ -305,7 +314,7 @@ def flatten_doc_node_to_html(
             return inner
         if func == "link":
             dest = node.get("dest", "")
-            body_html = flatten_doc_node_to_html(node.get("body", ""), emphasis_map)
+            body_html = flatten_doc_node_to_html(node.get("body", ""), emphasis_map, site_base_url)
             if isinstance(dest, str) and dest.startswith("#cond="):
                 m = re.match(r"#cond=(.+):([01])$", dest)
                 if m:
@@ -321,7 +330,12 @@ def flatten_doc_node_to_html(
                         f"{body_html}</span>"
                     )
             dest_escaped = html.escape(str(dest), quote=True)
-            return f'<a href="{dest_escaped}" tabindex="-1">{body_html}</a>'
+            target_attrs = (
+                EXTERNAL_LINK_ATTRS
+                if is_external_href(str(dest), site_base_url)
+                else ""
+            )
+            return f'<a href="{dest_escaped}"{target_attrs} tabindex="-1">{body_html}</a>'
         if func == "raw":
             text = node.get("text", "")
             copy_id = make_raw_copy_id(text)
@@ -336,20 +350,20 @@ def flatten_doc_node_to_html(
             parts.append(html.escape(text_val))
         for key in ("body", "children", "child", "value", "values", "content"):
             if key in node:
-                parts.append(flatten_doc_node_to_html(node[key], emphasis_map))
+                parts.append(flatten_doc_node_to_html(node[key], emphasis_map, site_base_url))
         if not parts:
             for key, value in node.items():
                 if key in ("func", "text"):
                     continue
                 if isinstance(value, (dict, list)):
-                    parts.append(flatten_doc_node_to_html(value, emphasis_map))
+                    parts.append(flatten_doc_node_to_html(value, emphasis_map, site_base_url))
         return "".join(parts)
     return ""
 
 
 def _is_inline_metadata(node: Dict[str, Any]) -> bool:
     t = node.get("t", "")
-    if t in ("b", "i", "lnk", "eq-il"):
+    if t in ("b", "i", "lnk", "eq-il", "fn"):
         return True
     if t == "raw" and not node.get("bl"):
         return True
@@ -411,6 +425,7 @@ def build_hidden_text(
     post_subtitle: Optional[str],
     asset_hash: str,
     nav_links: Optional[List[Tuple[str, str]]] = None,
+    site_base_url: Optional[str] = None,
 ) -> str:
     """Build sr-only HTML from <driver-doc> metadata elements."""
     header: List[str] = [f"<h1>{html.escape(post_title)}</h1>"]
@@ -424,12 +439,16 @@ def build_hidden_text(
 
     elem_links: Dict[int, List[Tuple[str, str]]] = {}
     ghost_texts: set = set()
+    footnote_bodies: List[Dict[str, Any]] = []
     last_text_idx: Optional[int] = None
     for i, elem in enumerate(doc_elements):
         t = elem.get("t", "")
         if t == "lnk":
             href = elem.get("href", "")
-            if href.startswith("#cond=") or href.startswith("#action="):
+            if href.startswith("#cond=") or (
+                href.startswith("#action=")
+                and not href.startswith("#action=copy:")
+            ):
                 text = re.sub(
                     r"\s+", " ", _flatten_query_text(elem.get("b", ""))
                 ).strip()
@@ -444,9 +463,11 @@ def build_hidden_text(
                 continue
             if last_text_idx is not None:
                 elem_links.setdefault(last_text_idx, []).append((href, label))
+        elif t == "fn":
+            footnote_bodies.append(elem)
         elif t in ("par", "h", "info", "dt", "li", "eli"):
             last_text_idx = i
-        elif t not in ("b", "i", "raw", "eq-il"):
+        elif t not in ("b", "i", "raw", "eq-il", "fn"):
             last_text_idx = None
 
     emphasis_map = _collect_emphasis_text(
@@ -561,16 +582,8 @@ def build_hidden_text(
                 skipped_pars += 1
                 continue
 
-            if t == "raw" and not node.get("bl"):
-                raw_text = node.get("x", "")
-                if raw_text:
-                    copy_id = make_raw_copy_id(raw_text)
-                    parts.append(
-                        f'<code id="raw-{copy_id}">'
-                        f"{html.escape(raw_text)}</code>"
-                    )
+            if t in ("raw", "b", "i") and not node.get("bl"):
                 continue
-            if t in ("b", "i"):
                 continue
 
             if t in ("ul", "ol"):
@@ -592,12 +605,12 @@ def build_hidden_text(
                             items.append(f"<li>{''.join(inner)}</li>")
                     else:
                         body_html = flatten_doc_node_to_html(
-                            child.get("b", ""), emphasis_map
+                            child.get("b", ""), emphasis_map, site_base_url
                         ).strip()
                         links = _links_for(child)
                         if links:
                             body_html = _embed_links_in_text(
-                                body_html, links
+                                body_html, links, site_base_url
                             )
                         items.append(f"<li>{body_html}</li>")
                 if items:
@@ -607,14 +620,14 @@ def build_hidden_text(
                 inner = render(node.get("children", []))
                 if not inner:
                     body_html = flatten_doc_node_to_html(
-                        node.get("b", ""), emphasis_map
+                        node.get("b", ""), emphasis_map, site_base_url
                     ).strip()
                     if body_html:
                         inner = [f"<p>{body_html}</p>"]
                 attr = node.get("attr")
                 attr_html = ""
                 if attr is not None:
-                    attr_text = flatten_doc_node_to_html(attr).strip()
+                    attr_text = flatten_doc_node_to_html(attr, emphasis_map, site_base_url).strip()
                     if attr_text:
                         attr_html = f"<footer>{attr_text}</footer>"
                 parts.append(
@@ -637,7 +650,7 @@ def build_hidden_text(
                                 if cap is not None and isinstance(cap, dict):
                                     label = fig_label(cap, "table")
                                     body_text = flatten_doc_node_to_html(
-                                        cap.get("body", "")
+                                        cap.get("body", ""), emphasis_map, site_base_url
                                     )
                                     caption = re.sub(
                                         r"\s+", " ", f"{label} {body_text}"
@@ -666,16 +679,16 @@ def build_hidden_text(
             elif t == "h":
                 level = min(node.get("l", 1) + 1, 6)
                 body_html = flatten_doc_node_to_html(
-                    node.get("b", ""), emphasis_map
+                    node.get("b", ""), emphasis_map, site_base_url
                 )
                 links = _links_for(node)
                 if links:
-                    body_html = _embed_links_in_text(body_html, links)
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
                 parts.append(f"<h{level}>{body_html}</h{level}>")
 
             elif t == "par":
                 body_html = flatten_doc_node_to_html(
-                    node.get("b", ""), emphasis_map
+                    node.get("b", ""), emphasis_map, site_base_url
                 ).strip()
                 if not body_html:
                     continue
@@ -694,7 +707,7 @@ def build_hidden_text(
                         continue
                 links = _links_for(node)
                 if links:
-                    body_html = _embed_links_in_text(body_html, links)
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
                 if "data-cond-id=" in body_html and parts:
                     m = _EMPTY_COND_SPAN_RE.search(parts[-1])
                     if m:
@@ -716,25 +729,25 @@ def build_hidden_text(
 
             elif t == "info":
                 body_html = flatten_doc_node_to_html(
-                    node.get("b", ""), emphasis_map
+                    node.get("b", ""), emphasis_map, site_base_url
                 )
                 body_html = re.sub(r"\s+", " ", body_html).strip()
                 links = _links_for(node)
                 if links:
-                    body_html = _embed_links_in_text(body_html, links)
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
                 parts.append(f"<aside><p>{body_html}</p></aside>")
 
             elif t == "dt":
                 term_html = flatten_doc_node_to_html(
-                    node.get("term", ""), emphasis_map
+                    node.get("term", ""), emphasis_map, site_base_url
                 ).strip()
                 desc_html = flatten_doc_node_to_html(
-                    node.get("b", ""), emphasis_map
+                    node.get("b", ""), emphasis_map, site_base_url
                 ).strip()
                 links = _links_for(node)
                 if links:
-                    term_html = _embed_links_in_text(term_html, links)
-                    desc_html = _embed_links_in_text(desc_html, links)
+                    term_html = _embed_links_in_text(term_html, links, site_base_url)
+                    desc_html = _embed_links_in_text(desc_html, links, site_base_url)
                 parts.append(
                     f"<dl><dt>{term_html}</dt><dd>{desc_html}</dd></dl>"
                 )
@@ -781,7 +794,7 @@ def build_hidden_text(
                     if isinstance(cap_node, dict):
                         label = fig_label(cap_node, "image")
                         body_text = flatten_doc_node_to_html(
-                            cap_node.get("body", "")
+                            cap_node.get("body", ""), emphasis_map, site_base_url
                         )
                         caption = re.sub(
                             r"\s+", " ", f"{label} {body_text}"
@@ -807,16 +820,31 @@ def build_hidden_text(
 
     body_parts = render(tree, skip_pars=skip_count)
     body_parts = [p for p in body_parts if p != "<p></p>"]
-    all_parts = header + body_parts
-    result = "\n".join(all_parts)
+
+    if footnote_bodies:
+        entries = []
+        for idx, fn in enumerate(footnote_bodies, start=1):
+            entry_html = flatten_doc_node_to_html(
+                fn.get("b", ""), emphasis_map, site_base_url
+            ).strip()
+            entries.append(f'<li id="fn-{idx}">{entry_html}</li>')
+        body_parts.append(
+            '<section class="footnotes" aria-label="Footnotes">'
+            f'<ol>{"".join(entries)}</ol></section>'
+        )
+
+    result = ''
 
     if nav_links:
-        nav_items = "".join(
-            f'<li><a href="{html.escape(href, quote=True)}" tabindex="-1">'
-            f"{html.escape(label)}</a></li>"
+        nav_items = " · ".join(
+            f'<a href="{html.escape(href, quote=True)}" tabindex="-1">'
+            f"{html.escape(label)}</a>"
             for href, label in nav_links
         )
-        result += f'\n<nav aria-label="Post navigation"><ul>{nav_items}</ul></nav>'
+        result += f'<p class="post-nav">{nav_items}</p>\n'
+
+    all_parts = header + body_parts
+    result += "\n".join(all_parts)
 
     return result
 

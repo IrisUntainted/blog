@@ -1,3 +1,5 @@
+import glob
+import hashlib
 import html
 import json
 import os
@@ -16,10 +18,14 @@ from .shared import (
 )
 from .post_entries import is_internal_post_entry
 from .utils import (
+    _ASSET_HASH_LENGTH,
+    _update_hash_with_typ_files,
     CompileBuildRequest,
     HtmlBuildConfig,
     MobileCompileConfig,
     compile_html,
+    decl_str_from_source,
+    extract_friend_card_symbols,
     first_desc,
     hash_text_with_paths,
     make_inputs,
@@ -33,7 +39,6 @@ PostEntry = Dict[str, Any]
 PostsByDate = Dict[str, List[PostEntry]]
 
 _REVISION_SUFFIX_PATTERN = re.compile(r"-(\d+)$")
-_SITE_TITLE = "Blog"
 _ROOT_SHARED_FILENAMES = ("robots.txt", "favicon.ico")
 
 
@@ -98,14 +103,10 @@ def _build_hidden_text(
 
     for date_str, day_posts in posts_by_date.items():
         sections.append(f"<h2>{html.escape(date_str)}</h2>")
-        sections.append("<ul>")
         for post in day_posts:
             href = html.escape(post["link"])
             label = html.escape(post["name"])
-            sections.append(
-                f'<li><a href="{href}" tabindex="-1">{label}</a></li>'
-            )
-        sections.append("</ul>")
+            sections.append(f'<p><a href="{href}" tabindex="-1">{label}</a></p>')
 
     return "\n".join(sections)
 
@@ -187,6 +188,118 @@ def _build_rss_lines(
     return rss_lines
 
 
+def _build_friends_hidden_text(
+    title: str, subtitle: Optional[str], friends: List[PostEntry]
+) -> str:
+    parts: List[str] = [f"<h1>{html.escape(title)}</h1>"]
+    if subtitle:
+        parts.append(f"<p>{html.escape(subtitle)}</p>")
+    parts.append("<h1>Friends</h1>")
+    for friend in friends:
+        name = html.escape(str(friend["name"]))
+        url = html.escape(str(friend["url"]))
+        description = html.escape(str(friend.get("description", "")))
+        parts.append(
+            f'<p class="friend"><a href="{url}" tabindex="-1">{name}</a>'
+            f" — {description}</p>"
+        )
+    return "\n".join(parts)
+
+
+def _friends_asset_hash(
+    source: str,
+    template_typ_path: str,
+    friends_json_path: str,
+    avatar_paths: List[str],
+) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(source.encode("utf-8"))
+    _update_hash_with_typ_files(hasher, [template_typ_path])
+    for path in [friends_json_path, *avatar_paths]:
+        hasher.update(path.encode("utf-8"))
+        with open(path, "rb") as f:
+            hasher.update(f.read())
+    return hasher.hexdigest()[:_ASSET_HASH_LENGTH]
+
+
+def build_friends_page(
+    base_dir: str,
+    root_dir: str,
+    build_base: str,
+    asset_context: Any,
+    base_url: str,
+) -> None:
+    template_path = os.path.join(base_dir, "friends.template.typ")
+    with open(template_path, "r", encoding="utf-8") as f:
+        friends_template = f.read()
+
+    friends_json_path = os.path.join(base_dir, "friends.json")
+    avatars_dir = os.path.join(base_dir, "friends-assets")
+    with open(friends_json_path, "r", encoding="utf-8") as f:
+        friends = json.load(f)
+
+    title = need_decl_str_from_source(friends_template, "title")
+    subtitle = decl_str_from_source(friends_template, "subtitle")
+    hidden_text = _build_friends_hidden_text(title, subtitle, friends)
+
+    output_dir = os.path.join(build_base, "friends")
+    reset_dir(output_dir)
+
+    template_typ_path = os.path.join(base_dir, "template.typ")
+    avatar_paths = [
+        os.path.join(avatars_dir, friend["avatar"])
+        for friend in friends
+        if friend.get("avatar")
+    ]
+    asset_hash = _friends_asset_hash(
+        friends_template,
+        template_typ_path,
+        friends_json_path,
+        avatar_paths,
+    )
+
+    og_url = page_url(
+        base_url=base_url,
+        root_dir=root_dir,
+        dest_dir=root_dir,
+        html_filename="friends.html",
+    )
+
+    compile_html(
+        CompileBuildRequest(
+            source_bytes=friends_template.encode(),
+            output_dir=output_dir,
+            asset_hash=asset_hash,
+            file_prefix="friends",
+            typst_inputs=make_inputs(shared_inputs={"back_href": "./index.html"}),
+            mobile=MobileCompileConfig(svg_name_prefix="m-friends"),
+            html=HtmlBuildConfig(
+                template_path=os.path.join(base_dir, "index.template.html"),
+                dest_dir=root_dir,
+                html_filename="friends.html",
+                title_format="Friends Page {i}",
+                svg_name_prefix="friends",
+                default_title=title,
+                asset_context=asset_context,
+                description=subtitle or title,
+                hidden_text_override=hidden_text,
+                asset_dest_dir=os.path.join(root_dir, "assets"),
+                image_source_dir=os.path.dirname(base_dir),
+                og_type="website",
+                og_url=og_url,
+                site_base_url=base_url,
+                load_friends_script=True,
+            ),
+        )
+    )
+
+    # Lift each rendered card into a <symbol> sprite referenced by a shufflable
+    # <use>; runs after compile_html so the SVGs are in final (svgo'd) form.
+    for pattern in (f"friends[0-9]*.{asset_hash}.svg", f"m-friends[0-9]*.{asset_hash}.svg"):
+        for svg_path in glob.glob(os.path.join(root_dir, "assets", pattern)):
+            extract_friend_card_symbols(svg_path)
+
+
 def update_content(args: Namespace) -> None:
     base_dir = driver_dir()
     root_dir: str = args.root_dir
@@ -263,7 +376,7 @@ def update_content(args: Namespace) -> None:
             html=HtmlBuildConfig(
                 template_path=html_template,
                 dest_dir=root_dir,
-                title_format="Blog Content Page {i}",
+                title_format="Content Page {i}",
                 default_title=page_title,
                 asset_context=asset_context,
                 description=page_description,
@@ -275,6 +388,14 @@ def update_content(args: Namespace) -> None:
                 site_base_url=base_url,
             ),
         )
+    )
+
+    build_friends_page(
+        base_dir=base_dir,
+        root_dir=root_dir,
+        build_base=args.build_base,
+        asset_context=asset_context,
+        base_url=base_url,
     )
 
     glyph_target_dirs: List[str] = [root_dir, content_asset_dir]

@@ -49,6 +49,19 @@
     return media?.matches ? DARK_THEME : LIGHT_THEME;
   };
 
+  const parseSvgCustomThemeVars = (svgRoot) => {
+    const style = svgRoot.querySelector('style');
+    if (!style) return null;
+    const text = style.textContent;
+    const darkMatch = text.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{[^{}]*\{([^}]*)\}/);
+    if (!darkMatch) return null;
+    const vars = {};
+    for (const m of darkMatch[1].matchAll(/(--svg-[\w-]+)\s*:\s*([^;]+)/g)) {
+      vars[m[1]] = m[2].trim();
+    }
+    return vars;
+  };
+
   const applyThemeToSvgRoot = (svgRoot, computedStyles) => {
     if (!svgRoot) {
       return;
@@ -57,6 +70,17 @@
       const value = computedStyles.getPropertyValue(token).trim();
       if (value) {
         svgRoot.style.setProperty(token, value);
+      }
+    }
+    const customVars = parseSvgCustomThemeVars(svgRoot);
+    if (!customVars) return;
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    for (const [token, darkValue] of Object.entries(customVars)) {
+      if (SVG_COLOR_TOKENS.includes(token)) continue;
+      if (isDark) {
+        svgRoot.style.setProperty(token, darkValue);
+      } else {
+        svgRoot.style.removeProperty(token);
       }
     }
   };

@@ -353,7 +353,7 @@ def run_compile(args: Namespace) -> None:
                 html=HtmlBuildConfig(
                     template_path=os.path.join(base_dir, "index.template.html"),
                     dest_dir=output_dirs.html_output_dir,
-                    title_format="Blog Page {i}",
+                    title_format="Page {i}",
                     default_title=post_title,
                     asset_context=asset_context,
                     description=post_subtitle,
@@ -391,6 +391,7 @@ def run_compile(args: Namespace) -> None:
                 ("meta.html", "Meta"),
                 (f"./assets/post.{compile_sources.asset_hash}.pdf", "PDF"),
             ],
+            site_base_url=base_url,
         )
 
         index_path = os.path.join(output_dirs.html_output_dir, "index.html")

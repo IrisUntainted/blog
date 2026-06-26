@@ -1,14 +1,9 @@
-#import "../../driver/template.typ": *;
+#import "../../driver/template.typ": *
 
 #let title = "Hello, World!"
 
-#let content = [
-  This is probably not the first post of this blog.
+#show: article.with(title: title)
 
-  But let's say it is, for the sake of tradition.
-]
+This is probably not the first post of this blog.
 
-#if sys.inputs.at("with_driver", default: "false") == "false" {
-  show: article.with(title: title)
-  content
-}
+But let's say it is, for the sake of tradition.

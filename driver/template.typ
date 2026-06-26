@@ -23,6 +23,10 @@
   )
 }
 
+#let theme_color(light, dark) = {
+  [#metadata((light: light.to-hex(), dark: dark.to-hex())) <driver-theme-color>]
+}
+
 #let info(body) = {
   [#metadata((t: "info", b: body)) <driver-doc>]
   [#block(
@@ -75,7 +79,7 @@
     ],
   )
 
-  set text(font: "Libertinus Serif", size: 12pt)
+  set text(font: ("Libertinus Serif", "Songti SC"), size: 12pt)
 
   show link: it => underline(offset: 2pt, stroke: 0.5pt)[#it]
 
@@ -86,6 +90,27 @@
 
 #let _driver_has_driver() = sys.inputs.at("with_driver", default: "false") == "true"
 #let _driver_is_svg_export() = sys.inputs.at("export_format", default: "svg") == "svg"
+
+// Rewrites images into a driver-image:// anchor so the SVG post-processing can
+// hash, convert, and bundle them as webp assets. Used by driver.typ and any
+// standalone page (e.g. friends) that renders images.
+#let driver_image_show(it) = {
+  if _driver_is_svg_export() {
+    layout(size => {
+      let dims = measure(block(width: size.width)[
+        #show image: img => img
+        #it
+      ])
+      let alt_part = if it.alt != none { "?alt=" + it.alt } else { "" }
+      link(
+        "driver-image://" + it.source + alt_part,
+        rect(width: dims.width, height: dims.height, fill: none, stroke: none),
+      )
+    })
+  } else {
+    it
+  }
+}
 
 #let right_top_bar(body, svg_only: true) = {
   if svg_only and not _driver_is_svg_export() {
@@ -177,6 +202,11 @@
 
   show terms.item: it => {
     [#metadata((t: "dt", term: it.term, b: it.description)) <driver-doc>]
+    it
+  }
+
+  show footnote: it => {
+    [#metadata((t: "fn", b: it.body)) <driver-doc>]
     it
   }
 
