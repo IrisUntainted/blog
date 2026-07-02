@@ -15,6 +15,12 @@
     url: "https://cloveryan.com/",
     description: "生命是灰色的，理论之树常青。",
     avatar: "cloveryan.png",
+  ),
+  (
+    name: "Scriptum Mistiviae",
+    url: "https://blog.mistivia.com/",
+    description: " ",
+    avatar: "mistivia.png",
   )
 )
 
