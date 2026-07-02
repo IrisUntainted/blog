@@ -2,8 +2,6 @@ import os
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .post_entries import is_internal_post_entry
-
 
 @dataclass(frozen=True)
 class WorkspaceRevision:
@@ -36,8 +34,6 @@ def list_revisions(posts_dir: str, workspace_name: str) -> List[WorkspaceRevisio
 
         day_revisions: List[WorkspaceRevision] = []
         for entry_name in os.listdir(date_dir):
-            if is_internal_post_entry(entry_name):
-                continue
             entry_path = os.path.join(date_dir, entry_name)
             if not os.path.isdir(entry_path):
                 continue

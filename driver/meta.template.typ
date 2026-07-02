@@ -1,8 +1,10 @@
-#import "driver/template.typ": driver_page
+#import "driver/template.typ": driver_page, requires_asset
 #let title = "Metadata"
 #let post_subtitle = {{POST_SUBTITLE}}
 
 #show: driver_page.with(title: title)
+
+#requires_asset("clipboard")
 
 *Post Title:* {{POST_TITLE}} \
 #if post_subtitle != none [

@@ -30,16 +30,18 @@ _INPUT_PREFIX = "input:"
 _FORM_ACTION_PREFIX = "form-action:"
 _CHECKBOX_PREFIX = "checkbox:"
 _RADIO_PREFIX = "radio:"
-_FORM_ACTION_PREFIXES = (
-    _INPUT_PREFIX,
-    _FORM_ACTION_PREFIX,
-    _CHECKBOX_PREFIX,
-    _RADIO_PREFIX,
+
+# Prepended to workspace form-hooks before minification so form.cond/action/on
+# register against a guaranteed-initialized form object.
+_FORM_HOOKS_STUB = (
+    "window.form=window.form||{_conds:{},_actions:{},_on:{}};"
+    "form.cond=(i,f)=>{form._conds[i]=f};"
+    "form.action=(i,f)=>{form._actions[i]=f};"
+    "form.on=(i,f)=>{(form._on[i]=form._on[i]||[]).push(f)};\n"
 )
 
 _WORKSPACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TYPST_DECLARED_STRING_PATTERN_TEMPLATE = r'#let\s+{name}\s*=\s*"([^"]*)"'
-_TYPST_DECLARED_CONTENT_PATTERN_TEMPLATE = r"#let\s+{name}\s*=\s*\[(.*?)\]"
+_REMOTE_IMAGE_PREFIX = "driver-remote-image://"
 _ASSET_HASH_LENGTH = 6
 _RAW_COPY_ID_HASH_LENGTH = 10
 WORKSPACE_PUBLIC_DIR_NAME = "public"
@@ -68,6 +70,8 @@ _SVG_THEME_FILL_CLASS_MAP: Dict[str, str] = {
     "#000000": "t",
     "black": "t",
     "#141414": "t",
+    "#373737": "theme-quote-text",
+    "#5a5a5a": "theme-caption-text",
     "#646464": "theme-muted-text",
     "#aaa": "theme-footer-text",
     "#aaaaaa": "theme-footer-text",
@@ -95,6 +99,8 @@ _SVG_THEME_STYLE = """
 <style id="driver-theme-style">
 .theme-paper-bg { fill: var(--svg-paper-bg, #ffffff) !important; }
 .t { fill: var(--svg-text, #141414) !important; }
+.theme-quote-text { fill: var(--svg-quote-text, #373737) !important; }
+.theme-caption-text { fill: var(--svg-caption-text, #5a5a5a) !important; }
 .theme-muted-text { fill: var(--svg-muted-text, #646464) !important; }
 .theme-footer-text { fill: var(--svg-footer-text, #aaaaaa) !important; }
 .theme-code-bg { fill: var(--svg-code-bg, #f5f5f5) !important; }
@@ -131,6 +137,8 @@ a:focus-visible > path {
   :root {
     --svg-paper-bg: #161b22;
     --svg-text: #e8ecf2;
+    --svg-quote-text: #cdd3df;
+    --svg-caption-text: #b4bbc9;
     --svg-muted-text: #a7b0bf;
     --svg-footer-text: #7f8897;
     --svg-code-bg: #222a34;
@@ -153,19 +161,39 @@ a[href^="#cond="] { pointer-events: none; }
 
 
 @dataclass(frozen=True)
-class DriverWebAssets:
-    stylesheet_path: str
-    clipboard_script_path: str
-    visual_script_path: str
-    form_script_path: str
-    friends_script_path: str
-    inline_style: str
-    inline_script: str
+class WebAsset:
+    kind: str
+    placement: str
+    href: Optional[str]
+    inline: Optional[str]
+
+
+@dataclass(frozen=True)
+class AssetSpec:
+    key: str
+    source: str
+    kind: str
+    placement: str
+    linkable: bool
+
+
+# Declares every driver web asset and how it is built and placed. Order is the
+# deterministic render order within <head>/<body>. Each project declares the keys
+# it requires via <driver-assets> metadata; only those are linked at build time.
+_ASSET_SPECS: Tuple[AssetSpec, ...] = (
+    AssetSpec("inline-style", "inline-style.css", "css", "head", False),
+    AssetSpec("inline-script", "inline-script.js", "js", "head", False),
+    AssetSpec("stylesheet", "site.css", "css", "head", True),
+    AssetSpec("visual", "visual.js", "js", "body", True),
+    AssetSpec("clipboard", "clipboard.js", "js", "body", True),
+    AssetSpec("form", "form.js", "js", "body", True),
+    AssetSpec("friends", "friends.js", "js", "body", True),
+)
 
 
 @dataclass(frozen=True)
 class DriverAssetContext:
-    web_assets: DriverWebAssets
+    web_assets: Dict[str, WebAsset]
     global_glyph_asset_path: str
     global_glyph_map_path: str
 
@@ -195,14 +223,12 @@ class HtmlBuildConfig:
     rss_feed_path: Optional[str] = None
     og_type: str = "website"
     og_url: Optional[str] = None
-    glyph_scope_key: Optional[str] = None
     shared_glyphs: bool = True
     image_source_dir: Optional[str] = None
     site_base_url: Optional[str] = None
     form_hooks: str = ""
     primary_pages_wrapper_class: str = ""
     extra_pages_html: str = ""
-    load_friends_script: bool = False
 
 
 @dataclass(frozen=True)
@@ -212,7 +238,6 @@ class MobileCompileConfig:
     paper_height: Optional[str] = "200mm"
     primary_wrapper_class: str = "pages pages-desktop"
     wrapper_class: str = "pages pages-mobile"
-    glyph_scope_key: str = "mobile"
 
 
 @dataclass(frozen=True)
@@ -228,8 +253,6 @@ class CompileBuildRequest:
 
 def make_inputs(
     shared_inputs: Optional[Dict[str, str]] = None,
-    svg_inputs: Optional[Dict[str, str]] = None,
-    pdf_inputs: Optional[Dict[str, str]] = None,
 ) -> TypstInputs:
     base_inputs = {"with_driver": "true"}
     if shared_inputs:
@@ -237,13 +260,9 @@ def make_inputs(
 
     svg = dict(base_inputs)
     svg["export_format"] = "svg"
-    if svg_inputs:
-        svg.update(svg_inputs)
 
     pdf = dict(base_inputs)
     pdf["export_format"] = "pdf"
-    if pdf_inputs:
-        pdf.update(pdf_inputs)
 
     return TypstInputs(svg=svg, pdf=pdf)
 
@@ -295,39 +314,28 @@ def _inject_svg_theme_classes(
         classes: List[str] = []
         attrs_to_remove: Set[str] = set()
 
-        fill_match = re.search(r'\sfill="([^"]+)"', attrs, flags=re.IGNORECASE)
-        if fill_match:
-            fill_value = fill_match.group(1).strip().lower()
-            cls = (
-                _SVG_THEME_FILL_CLASS_MAP.get(fill_value)
-                or extra_fill.get(fill_value)
+        def _classify(attr_name, static_map, extra_map):
+            attr_match = re.search(
+                rf'\s{attr_name}="([^"]+)"', attrs, flags=re.IGNORECASE
             )
+            if not attr_match:
+                return
+            value = attr_match.group(1).strip().lower()
+            cls = static_map.get(value) or extra_map.get(value)
             if cls:
                 classes.append(cls)
-                attrs_to_remove.add("fill")
+                attrs_to_remove.add(attr_name)
 
-        stroke_match = re.search(r'\sstroke="([^"]+)"', attrs, flags=re.IGNORECASE)
-        if stroke_match:
-            stroke_value = stroke_match.group(1).strip().lower()
-            cls = (
-                _SVG_THEME_STROKE_CLASS_MAP.get(stroke_value)
-                or extra_stroke.get(stroke_value)
-            )
-            if cls:
-                classes.append(cls)
-                attrs_to_remove.add("stroke")
+        _classify("fill", _SVG_THEME_FILL_CLASS_MAP, extra_fill)
+        _classify("stroke", _SVG_THEME_STROKE_CLASS_MAP, extra_stroke)
 
         if not classes:
             return match.group(0)
 
-        updated_attrs = attrs
-        for attr_name in sorted(attrs_to_remove):
-            updated_attrs = re.sub(
-                rf'\s{attr_name}="[^"]*"',
-                "",
-                updated_attrs,
-                flags=re.IGNORECASE,
-            )
+        attrs_alt = "|".join(sorted(attrs_to_remove))
+        updated_attrs = re.sub(
+            rf'\s(?:{attrs_alt})="[^"]*"', "", attrs, flags=re.IGNORECASE
+        )
         for class_name in classes:
             updated_attrs = _append_svg_class(updated_attrs, class_name)
         return f"<{tag}{updated_attrs}>"
@@ -541,14 +549,10 @@ def reset_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
-def get_temp_root(build_base: str) -> str:
+def make_temp_dir(build_base: str, prefix: str) -> str:
     temp_root = os.path.join(os.path.abspath(build_base), TEMP_WORK_DIR_NAME)
     os.makedirs(temp_root, exist_ok=True)
-    return temp_root
-
-
-def make_temp_dir(build_base: str, prefix: str) -> str:
-    return tempfile.mkdtemp(prefix=prefix, dir=get_temp_root(build_base))
+    return tempfile.mkdtemp(prefix=prefix, dir=temp_root)
 
 
 def validate_workspace(name: str) -> str:
@@ -629,38 +633,6 @@ def _rebase_relative_href_for_destination(
     return rebased_href
 
 
-def decl_str_from_source(source: str, name: str) -> Optional[str]:
-    string_pattern = re.compile(
-        _TYPST_DECLARED_STRING_PATTERN_TEMPLATE.format(name=re.escape(name))
-    )
-    match = string_pattern.search(source)
-    if match:
-        value = match.group(1).strip()
-        if not value:
-            return None
-        return value
-
-    content_pattern = re.compile(
-        _TYPST_DECLARED_CONTENT_PATTERN_TEMPLATE.format(name=re.escape(name)),
-        flags=re.DOTALL,
-    )
-    match = content_pattern.search(source)
-    if not match:
-        return None
-
-    value = re.sub(r"\s+", " ", match.group(1)).strip()
-    if not value:
-        return None
-    return value
-
-
-def need_decl_str_from_source(source: str, name: str) -> str:
-    value = decl_str_from_source(source, name)
-    if value is None:
-        raise RuntimeError(f"Missing required {name} declaration in Typst source.")
-    return value
-
-
 def _remove_stale_hashed_assets(
     asset_dir: str,
     prefix: str,
@@ -726,7 +698,7 @@ def _minify_js_source(source: str) -> str:
 
     try:
         result = subprocess.run(
-            [terser_path, "--compress", "--mangle", "--ecma", "2020"],
+            [terser_path, "--compress", "passes=2", "--mangle", "--ecma", "2020"],
             check=True,
             input=source,
             text=True,
@@ -838,25 +810,7 @@ def minify_html(path: str) -> None:
         f.write(minified)
 
 
-def _remove_legacy_root_js_files(webroot_dir: str) -> int:
-    if not os.path.isdir(webroot_dir):
-        return 0
-
-    removed_count = 0
-    for filename in os.listdir(webroot_dir):
-        if not re.fullmatch(r"(?:clipboard|visual|form|friends)(?:\.[^.]+)?(?:\.min)?\.js", filename):
-            continue
-        target_path = os.path.join(webroot_dir, filename)
-        if os.path.isfile(target_path):
-            try:
-                os.remove(target_path)
-                removed_count += 1
-            except FileNotFoundError:
-                continue
-    return removed_count
-
-
-def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
+def build_web_assets(driver_dir: str, webroot_dir: str) -> Dict[str, WebAsset]:
     if not os.path.isdir(driver_dir):
         raise FileNotFoundError(driver_dir)
 
@@ -864,73 +818,31 @@ def build_web_assets(driver_dir: str, webroot_dir: str) -> DriverWebAssets:
     assets_dir = safe_join_child(webroot_dir, WEB_ASSETS_DIR_NAME)
     os.makedirs(assets_dir, exist_ok=True)
 
-    stylesheet_src_path = os.path.join(driver_dir, "site.css")
-    clipboard_src_path = os.path.join(driver_dir, "clipboard.js")
-    visual_src_path = os.path.join(driver_dir, "visual.js")
-    form_src_path = os.path.join(driver_dir, "form.js")
-    friends_src_path = os.path.join(driver_dir, "friends.js")
-
-    with open(stylesheet_src_path, "r", encoding="utf-8") as f:
-        stylesheet_source = f.read().strip() + "\n"
-    with open(clipboard_src_path, "r", encoding="utf-8") as f:
-        clipboard_source = f.read()
-    with open(visual_src_path, "r", encoding="utf-8") as f:
-        visual_source = f.read()
-    with open(form_src_path, "r", encoding="utf-8") as f:
-        form_source = f.read()
-    with open(friends_src_path, "r", encoding="utf-8") as f:
-        friends_source = f.read()
-
-    stylesheet_asset_path = _write_hashed_asset(
-        asset_dir=assets_dir,
-        prefix="site",
-        suffix=".css",
-        content=_minify_css_source(stylesheet_source),
-    )
-    clipboard_asset_path = _write_hashed_asset(
-        asset_dir=assets_dir,
-        prefix="clipboard",
-        suffix=".min.js",
-        content=_minify_js_source(clipboard_source),
-    )
-    visual_asset_path = _write_hashed_asset(
-        asset_dir=assets_dir,
-        prefix="visual",
-        suffix=".min.js",
-        content=_minify_js_source(visual_source),
-    )
-    form_asset_path = _write_hashed_asset(
-        asset_dir=assets_dir,
-        prefix="form",
-        suffix=".min.js",
-        content=_minify_js_source(form_source),
-    )
-    friends_asset_path = _write_hashed_asset(
-        asset_dir=assets_dir,
-        prefix="friends",
-        suffix=".min.js",
-        content=_minify_js_source(friends_source),
-    )
-
-    inline_style_src_path = os.path.join(driver_dir, "inline-style.css")
-    inline_script_src_path = os.path.join(driver_dir, "inline-script.js")
-
-    with open(inline_style_src_path, "r", encoding="utf-8") as f:
-        inline_style_source = f.read()
-    with open(inline_script_src_path, "r", encoding="utf-8") as f:
-        inline_script_source = f.read()
-
-    web_assets = DriverWebAssets(
-        stylesheet_path=stylesheet_asset_path,
-        clipboard_script_path=clipboard_asset_path,
-        visual_script_path=visual_asset_path,
-        form_script_path=form_asset_path,
-        friends_script_path=friends_asset_path,
-        inline_style=_minify_css_source(inline_style_source),
-        inline_script=_minify_js_source(inline_script_source),
-    )
-
-    _remove_legacy_root_js_files(webroot_dir)
+    web_assets: Dict[str, WebAsset] = {}
+    for spec in _ASSET_SPECS:
+        with open(os.path.join(driver_dir, spec.source), "r", encoding="utf-8") as f:
+            source = f.read()
+        minified = (
+            _minify_css_source(source)
+            if spec.kind == "css"
+            else _minify_js_source(source)
+        )
+        if not spec.linkable:
+            web_assets[spec.key] = WebAsset(
+                kind=spec.kind, placement=spec.placement, href=None, inline=minified
+            )
+            continue
+        prefix = os.path.splitext(spec.source)[0]
+        suffix = ".css" if spec.kind == "css" else ".min.js"
+        path = _write_hashed_asset(
+            asset_dir=assets_dir, prefix=prefix, suffix=suffix, content=minified
+        )
+        web_assets[spec.key] = WebAsset(
+            kind=spec.kind,
+            placement=spec.placement,
+            href=build_root_asset_href(path),
+            inline=None,
+        )
     return web_assets
 
 
@@ -977,13 +889,7 @@ def _resolve_pdf_creation_timestamp(inputs: Optional[Dict[str, str]]) -> Optiona
     if not inputs:
         return None
 
-    raw_date: Optional[str]
-    if "edited_date" in inputs:
-        raw_date = inputs["edited_date"]
-    elif "publish_date" in inputs:
-        raw_date = inputs["publish_date"]
-    else:
-        raw_date = None
+    raw_date = inputs.get("edited_date") or inputs.get("publish_date")
     if not raw_date:
         return None
 
@@ -1001,13 +907,13 @@ def _flatten_query_text(node: Any, skip_cond_links: bool = False) -> str:
     if isinstance(node, list):
         return "".join(_flatten_query_text(item, skip_cond_links) for item in node)
     if isinstance(node, dict):
-        func = node["func"] if "func" in node else None
+        func = node.get("func")
         if func == "space":
             return " "
         if func == "linebreak":
             return "\n"
         if func == "smartquote":
-            return '"' if ("double" in node and bool(node["double"])) else "'"
+            return '"' if node.get("double") else "'"
         if skip_cond_links and func == "link":
             dest = node.get("dest", "")
             if isinstance(dest, str) and dest.startswith(_COND_HREF_PREFIX):
@@ -1015,7 +921,7 @@ def _flatten_query_text(node: Any, skip_cond_links: bool = False) -> str:
             return _flatten_query_text(node.get("body", ""), skip_cond_links)
 
         parts: List[str] = []
-        text = node["text"] if "text" in node else None
+        text = node.get("text")
         if isinstance(text, str):
             parts.append(text)
         for key in ("body", "children", "child", "value", "values", "content"):
@@ -1029,36 +935,6 @@ def _flatten_query_text(node: Any, skip_cond_links: bool = False) -> str:
                     parts.append(_flatten_query_text(value, skip_cond_links))
         return "".join(parts)
     return ""
-
-
-def _query_nodes(
-    main_typ_path: str,
-    query_root: str,
-    selector: str,
-    inputs: Optional[Dict[str, str]] = None,
-) -> List[Dict[str, Any]]:
-    abs_main_typ = os.path.abspath(main_typ_path)
-    abs_query_root = os.path.abspath(query_root)
-    query_input = os.path.relpath(abs_main_typ, start=abs_query_root).replace("\\", "/")
-
-    command = [
-        _resolve_typst_path(),
-        "query",
-        query_input,
-        selector,
-        "--root",
-        abs_query_root,
-        "--format",
-        "json",
-    ]
-    if inputs:
-        for key, value in inputs.items():
-            command.extend(["--input", f"{key}={value}"])
-
-    return _run_typst_query_json(
-        command=command,
-    )
-
 
 def _run_typst_query_json(
     command: List[str],
@@ -1164,7 +1040,7 @@ def _extract_typst_table_rows(
         col_index += colspan
 
     if occupied:
-        row_count = max(row for row, _ in occupied.keys()) + 1
+        row_count = max(row for row, _ in occupied) + 1
         while len(rows) < row_count:
             rows.append([])
         if len(rows) > row_count:
@@ -1202,6 +1078,75 @@ def _query_nodes_from_source(
         command=command,
         source_bytes=source_bytes,
         cwd=query_root,
+    )
+
+
+_TITLE_SUBTITLE_SELECTOR = "<title-subtitle>"
+
+
+def _declared_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", _flatten_query_text(value)).strip()
+    return text or None
+
+
+def _parse_title_subtitle(
+    nodes: List[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str]]:
+    value = nodes[0]["value"] if nodes else {}
+    return _declared_text(value.get("title")), _declared_text(value.get("subtitle"))
+
+
+def _fetch_title_subtitle(
+    query_source: str, query_root: str, missing_context: str
+) -> Tuple[str, Optional[str]]:
+    title, subtitle = _parse_title_subtitle(
+        _query_nodes_from_source(
+            query_source, query_root=query_root, selector=_TITLE_SUBTITLE_SELECTOR
+        )
+    )
+    if title is None:
+        raise RuntimeError(f"Missing required title declaration in {missing_context}.")
+    return title, subtitle
+
+
+def query_title_subtitle(typ_path: str, query_root: str) -> Tuple[str, Optional[str]]:
+    """Return ``(title, subtitle)`` declared in a self-contained Typst source
+    file (one whose imports resolve relative to its own location, e.g. a
+    workspace post). ``title`` is required; ``subtitle`` is ``None`` if absent.
+    """
+    rel = os.path.relpath(
+        os.path.abspath(typ_path), os.path.abspath(query_root)
+    ).replace("\\", "/")
+    return _fetch_title_subtitle(
+        query_source=(
+            f'#import "{rel}" as _src\n'
+            f"#let _exports = dictionary(_src)\n"
+            f'#metadata((title: _exports.at("title", default: none), '
+            f'subtitle: _exports.at("subtitle", default: none))) '
+            f"{_TITLE_SUBTITLE_SELECTOR}"
+        ),
+        query_root=query_root,
+        missing_context=typ_path,
+    )
+
+
+def query_title_subtitle_from_source(
+    source: str, query_root: str
+) -> Tuple[str, Optional[str]]:
+    """Return ``(title, subtitle)`` from a Typst document source compiled from
+    the project root (imports relative to the root), e.g. the friends/content
+    templates. ``title`` is required; ``subtitle`` is ``None`` if absent.
+    """
+    return _fetch_title_subtitle(
+        query_source=(
+            source.rstrip()
+            + "\n"
+            + f"#metadata((title: title, subtitle: subtitle)) {_TITLE_SUBTITLE_SELECTOR}"
+        ),
+        query_root=query_root,
+        missing_context="Typst source",
     )
 
 
@@ -1368,10 +1313,6 @@ _SVG_DEFS_PATTERN = re.compile(r"<defs>(.*?)</defs>", flags=re.DOTALL)
 _SVG_SYMBOL_PATTERN = re.compile(r"<symbol\b([^>]*)>(.*?)</symbol>", flags=re.DOTALL)
 _SVG_ID_ATTR_PATTERN = re.compile(r'\s+id="([^"]+)"')
 _SVG_WHITESPACE_PATTERN = re.compile(r"\s+")
-_SVG_EXTERNAL_GLYPH_REF_PATTERN = re.compile(
-    r"(?:xlink:)?href\s*=\s*['\"][^'\"]*glyphs(?:[-.][^'\"#?]*)?\.svg(?:\?[^'\"#]*)?(?:#[^'\"]+)?['\"]",
-    flags=re.IGNORECASE,
-)
 _HTML_BODY_OPEN_TAG_PATTERN = re.compile(r"<body\b[^>]*>", flags=re.IGNORECASE)
 _GLYPH_PRELOAD_SVG_PATTERN = re.compile(
     r"<svg\b(?=[^>]*\bdata-glyph-preload\s*=\s*['\"]true['\"])[^>]*>.*?</svg>",
@@ -1608,26 +1549,14 @@ def _extract_wrapped_global_short_id(symbol_body: str) -> Optional[str]:
 
 def _extract_and_rewrite_shared_svg_glyphs(
     svg_paths: List[str],
-    dest_dir: str,
-    glyph_scope_key: str,
-    global_glyph_asset_path: Optional[str] = None,
-    global_glyph_map_path: Optional[str] = None,
+    global_glyph_asset_path: str,
+    global_glyph_map_path: str,
 ) -> Optional[str]:
     if not svg_paths:
         return None
 
-    use_global_registry = bool(global_glyph_asset_path and global_glyph_map_path)
-    registry: Optional[Dict[str, Any]] = None
-    if use_global_registry:
-        if global_glyph_map_path is None:
-            raise RuntimeError("Global glyph map path is required.")
-        registry = _load_global_glyph_registry(global_glyph_map_path)
+    registry = _load_global_glyph_registry(global_glyph_map_path)
 
-    scope_component = _sanitize_asset_prefix_component(glyph_scope_key)
-    if not scope_component:
-        scope_component = "default"
-
-    long_id_to_symbol: Dict[str, Tuple[str, str]] = {}
     page_symbol_maps: List[Tuple[str, str, str, List[Tuple[str, str, str]]]] = []
 
     for svg_path in svg_paths:
@@ -1644,118 +1573,68 @@ def _extract_and_rewrite_shared_svg_glyphs(
 
         local_symbol_map: List[Tuple[str, str, str]] = []
         for local_id, attrs_without_id, body in symbols:
-            if use_global_registry and registry is not None:
-                wrapped_short_id = _extract_wrapped_global_short_id(body)
-                if wrapped_short_id:
-                    existing_symbols: Dict[str, Dict[str, str]] = registry["symbols"]
-                    if wrapped_short_id in existing_symbols:
-                        local_symbol_map.append(
-                            (local_id, attrs_without_id, wrapped_short_id)
-                        )
-                        continue
+            wrapped_short_id = _extract_wrapped_global_short_id(body)
+            if wrapped_short_id:
+                existing_symbols: Dict[str, Dict[str, str]] = registry["symbols"]
+                if wrapped_short_id in existing_symbols:
+                    local_symbol_map.append(
+                        (local_id, attrs_without_id, wrapped_short_id)
+                    )
+                    continue
 
             symbol_fingerprint = _canonical_symbol_fingerprint(attrs_without_id, body)
             fingerprint_digest = hashlib.sha1(
                 symbol_fingerprint.encode("utf-8")
             ).hexdigest()
 
-            if use_global_registry and registry is not None:
-                short_id = _resolve_global_short_id(
-                    registry,
-                    typst_id=local_id,
-                    fingerprint=fingerprint_digest,
-                    attrs_without_id=attrs_without_id,
-                    body=body,
-                )
-                local_symbol_map.append((local_id, attrs_without_id, short_id))
-                continue
-
-            long_id = f"glyph-{scope_component}-{fingerprint_digest}"
-            if long_id not in long_id_to_symbol:
-                long_id_to_symbol[long_id] = (attrs_without_id, body)
-            local_symbol_map.append((local_id, attrs_without_id, long_id))
+            short_id = _resolve_global_short_id(
+                registry,
+                typst_id=local_id,
+                fingerprint=fingerprint_digest,
+                attrs_without_id=attrs_without_id,
+                body=body,
+            )
+            local_symbol_map.append((local_id, attrs_without_id, short_id))
 
         page_symbol_maps.append((svg_path, svg_data, defs_block, local_symbol_map))
 
     if not page_symbol_maps:
         return None
 
-    short_id_map: Dict[str, str] = {}
-    if use_global_registry and registry is not None:
-        symbols = registry["symbols"]
-        if not symbols:
-            return None
-        glyph_svg = _render_glyph_svg(symbols)
-        if global_glyph_asset_path is None:
-            raise RuntimeError("Global glyph asset path is required.")
-        glyph_asset_seed_path = os.path.abspath(global_glyph_asset_path)
-        glyph_asset_dir = os.path.dirname(glyph_asset_seed_path)
-        glyph_asset_seed_name = os.path.basename(glyph_asset_seed_path)
-        glyph_asset_prefix, glyph_asset_suffix = os.path.splitext(glyph_asset_seed_name)
-        sanitized_prefix = _sanitize_asset_prefix_component(glyph_asset_prefix)
-        if not sanitized_prefix:
-            sanitized_prefix = "glyphs"
-        if not glyph_asset_suffix:
-            glyph_asset_suffix = ".svg"
+    symbols = registry["symbols"]
+    if not symbols:
+        return None
+    glyph_svg = _render_glyph_svg(symbols)
+    glyph_asset_seed_path = os.path.abspath(global_glyph_asset_path)
+    glyph_asset_dir = os.path.dirname(glyph_asset_seed_path)
+    glyph_asset_seed_name = os.path.basename(glyph_asset_seed_path)
+    glyph_asset_prefix, glyph_asset_suffix = os.path.splitext(glyph_asset_seed_name)
+    sanitized_prefix = _sanitize_asset_prefix_component(glyph_asset_prefix)
+    if not sanitized_prefix:
+        sanitized_prefix = "glyphs"
+    if not glyph_asset_suffix:
+        glyph_asset_suffix = ".svg"
 
-        glyph_asset_path = _write_hashed_asset(
-            asset_dir=glyph_asset_dir,
-            prefix=sanitized_prefix,
-            suffix=glyph_asset_suffix,
-            content=glyph_svg,
-            remove_stale=False,
-        )
-        if global_glyph_map_path is None:
-            raise RuntimeError("Global glyph map path is required.")
-        glyph_map_path = os.path.abspath(global_glyph_map_path)
-        os.makedirs(os.path.dirname(glyph_map_path), exist_ok=True)
-        _write_global_glyph_registry(glyph_map_path, registry)
-    else:
-        if not long_id_to_symbol:
-            return None
-        for index, long_id in enumerate(sorted(long_id_to_symbol.keys()), start=1):
-            short_id_map[long_id] = f"g{_to_base36(index)}"
-
-        glyph_symbols: List[str] = []
-        for long_id in sorted(long_id_to_symbol.keys()):
-            attrs_without_id, body = long_id_to_symbol[long_id]
-            short_id = short_id_map[long_id]
-            glyph_symbols.append(
-                f'<symbol id="{short_id}"{attrs_without_id}>{body}</symbol>'
-            )
-
-        glyph_svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" '
-            'xmlns:xlink="http://www.w3.org/1999/xlink">'
-            f"<defs>{''.join(glyph_symbols)}</defs>"
-            "</svg>"
-        )
-
-        assets_dir = safe_join_child(dest_dir, WEB_ASSETS_DIR_NAME)
-        os.makedirs(assets_dir, exist_ok=True)
-        glyph_prefix = f"glyphs-{scope_component}"
-        glyph_asset_path = _write_hashed_asset(
-            asset_dir=assets_dir,
-            prefix=glyph_prefix,
-            suffix=".svg",
-            content=glyph_svg,
-        )
+    glyph_asset_path = _write_hashed_asset(
+        asset_dir=glyph_asset_dir,
+        prefix=sanitized_prefix,
+        suffix=glyph_asset_suffix,
+        content=glyph_svg,
+        remove_stale=False,
+    )
+    os.makedirs(os.path.dirname(global_glyph_map_path), exist_ok=True)
+    _write_global_glyph_registry(global_glyph_map_path, registry)
 
     for svg_path, svg_data, defs_block, local_symbol_map in page_symbol_maps:
-        glyph_href = (
-            build_root_asset_href(glyph_asset_path)
-            if use_global_registry
-            else f"./{_build_asset_rel_path(glyph_asset_path)}"
-        )
+        glyph_href = build_root_asset_href(glyph_asset_path)
         wrapper_symbols: List[str] = []
         seen_local_ids: Set[str] = set()
 
-        for local_id, attrs_without_id, long_id in local_symbol_map:
+        for local_id, attrs_without_id, short_id in local_symbol_map:
             if local_id in seen_local_ids:
                 continue
             seen_local_ids.add(local_id)
 
-            short_id = long_id if use_global_registry else short_id_map[long_id]
             wrapper_symbols.append(
                 f'<symbol id="{local_id}"{attrs_without_id}'
                 f'><use href="{glyph_href}#{short_id}"/></symbol>'
@@ -1793,8 +1672,6 @@ def apply_glyph_map(root_dir: str, target_dirs: List[str]) -> Optional[str]:
 
     glyph_result = _extract_and_rewrite_shared_svg_glyphs(
         svg_paths,
-        dest_dir=root_dir,
-        glyph_scope_key="global",
         global_glyph_asset_path=glyph_asset_path,
         global_glyph_map_path=glyph_map_path,
     )
@@ -1854,42 +1731,13 @@ def clean_glyph_assets(
         is_root_assets_dir = normalized_asset_dir == os.path.abspath(root_assets_dir)
 
         for filename in os.listdir(asset_dir):
-            if filename == GLOBAL_GLYPH_ASSET_FILENAME:
-                if (
-                    clean_global_store
-                    and is_root_assets_dir
-                    and not _is_root_asset_referenced(root_dir, filename)
-                ):
-                    target_path = os.path.join(asset_dir, filename)
-                    if os.path.isfile(target_path):
-                        os.remove(target_path)
-                        cleaned_count += 1
-                continue
-
-            remove_legacy_post_glyph = filename.startswith(
-                "glyphs-"
-            ) and filename.endswith(".svg")
-            remove_legacy_global_glyph = (
+            is_stale_global_glyph = (
                 clean_global_store
                 and is_root_assets_dir
                 and bool(re.fullmatch(r"glyphs\.[0-9a-f]{6}\.svg", filename))
+                and not _is_root_asset_referenced(root_dir, filename)
             )
-            if remove_legacy_global_glyph and _is_root_asset_referenced(
-                root_dir, filename
-            ):
-                remove_legacy_global_glyph = False
-
-            remove_legacy_global_map = (
-                clean_global_store
-                and is_root_assets_dir
-                and bool(re.fullmatch(r"glyph-map\.[0-9a-f]{6}\.json", filename))
-            )
-
-            if not (
-                remove_legacy_post_glyph
-                or remove_legacy_global_glyph
-                or remove_legacy_global_map
-            ):
+            if not is_stale_global_glyph:
                 continue
 
             target_path = os.path.join(asset_dir, filename)
@@ -2003,8 +1851,11 @@ def _extract_anchor_href(attrs: str) -> Optional[str]:
 
 
 def _parse_action_payload(action_payload: str) -> Tuple[str, Dict[str, str]]:
-    segments = [segment.strip() for segment in action_payload.split("|")]
-    segments = [segment for segment in segments if segment]
+    segments = [
+        stripped
+        for segment in action_payload.split("|")
+        if (stripped := segment.strip())
+    ]
     if not segments:
         return "", {}
 
@@ -2167,9 +2018,8 @@ _HTML_TITLE_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _read_html_title(html_path: str) -> Optional[str]:
-    cached = _HTML_TITLE_CACHE.get(html_path)
-    if cached is not None or html_path in _HTML_TITLE_CACHE:
-        return cached
+    if html_path in _HTML_TITLE_CACHE:
+        return _HTML_TITLE_CACHE[html_path]
 
     if not os.path.isfile(html_path):
         _HTML_TITLE_CACHE[html_path] = None
@@ -2178,18 +2028,12 @@ def _read_html_title(html_path: str) -> Optional[str]:
     with open(html_path, "r", encoding="utf-8") as html_file:
         html_data = html_file.read()
 
-    h1_match = _HTML_H1_TAG_PATTERN.search(html_data)
-    if h1_match is not None:
-        title = html.unescape(" ".join(h1_match.group("title").split())).strip()
-        _HTML_TITLE_CACHE[html_path] = title or None
-        return _HTML_TITLE_CACHE[html_path]
-
-    title_match = _HTML_TITLE_TAG_PATTERN.search(html_data)
-    if title_match is None:
+    match = _HTML_H1_TAG_PATTERN.search(html_data) or _HTML_TITLE_TAG_PATTERN.search(html_data)
+    if match is None:
         _HTML_TITLE_CACHE[html_path] = None
         return None
 
-    title = html.unescape(" ".join(title_match.group("title").split())).strip()
+    title = html.unescape(" ".join(match.group("title").split())).strip()
     _HTML_TITLE_CACHE[html_path] = title or None
     return _HTML_TITLE_CACHE[html_path]
 
@@ -2549,14 +2393,6 @@ def _replace_driver_image_anchors(
             return match.group(0)
         href = href_match.group(1)
 
-        parsed = urlparse(href)
-        if parsed.scheme != "driver-image":
-            return match.group(0)
-
-        image_rel = unquote(parsed.netloc + parsed.path)
-        alt_values = parse_qs(parsed.query).get("alt", [])
-        alt = alt_values[0] if alt_values else None
-
         w_h = re.search(
             r'<rect\b[^>]*\bwidth=["\']([^"\']+)["\'][^>]*\bheight=["\']([^"\']+)["\']',
             body,
@@ -2571,6 +2407,34 @@ def _replace_driver_image_anchors(
             width, height = h_w.group(2), h_w.group(1)
         else:
             return match.group(0)
+
+        # Remote avatar: leave the URL intact so the browser loads it on visit.
+        if href.startswith(_REMOTE_IMAGE_PREFIX):
+            rest = href[len(_REMOTE_IMAGE_PREFIX):]
+            alt = None
+            alt_idx = rest.rfind("?alt=")
+            if alt_idx != -1:
+                alt = rest[alt_idx + len("?alt="):]
+                rest = rest[:alt_idx]
+            url = rest
+            if alt:
+                return (
+                    f'<image href="{html.escape(url, quote=True)}"'
+                    f' width="{width}" height="{height}" role="img"'
+                    f' aria-label="{html.escape(alt, quote=True)}"/>'
+                )
+            return (
+                f'<image href="{html.escape(url, quote=True)}"'
+                f' width="{width}" height="{height}" role="presentation"/>'
+            )
+
+        parsed = urlparse(href)
+        if parsed.scheme != "driver-image":
+            return match.group(0)
+
+        image_rel = unquote(parsed.netloc + parsed.path)
+        alt_values = parse_qs(parsed.query).get("alt", [])
+        alt = alt_values[0] if alt_values else None
 
         src_path = os.path.join(image_source_dir, image_rel)
         if not os.path.isfile(src_path):
@@ -2782,15 +2646,11 @@ def patch_svg_file(
 
     def _rewrite_anchor_tag(match: re.Match) -> str:
         attrs = match.group(1)
-        javascript_parent_match = re.search(
-            r"\s+(?:xlink:)?href\s*=\s*['\"]javascript:parent\.(?:copyCode|toggleColorTheme)\(",
-            attrs,
-        )
         action_hash_match = re.search(
             r"\s+(?:xlink:)?href\s*=\s*['\"]#(?:action|cond)=[^'\"]*['\"]",
             attrs,
         )
-        if javascript_parent_match or action_hash_match:
+        if action_hash_match:
             attrs_without_target = re.sub(
                 r"\s+target\s*=\s*['\"][^'\"]*['\"]",
                 "",
@@ -2878,7 +2738,6 @@ def _process_svg_set(
     image_source_dir: Optional[str],
     action_metadata: Optional[Dict[str, Dict[str, str]]],
     shared_glyphs: bool,
-    glyph_scope_key: str,
     asset_context: DriverAssetContext,
     page_count_limit: Optional[int] = None,
     custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
@@ -2930,8 +2789,6 @@ def _process_svg_set(
     if shared_glyphs:
         glyph_asset_path = _extract_and_rewrite_shared_svg_glyphs(
             patched_svg_paths,
-            dest_dir=asset_dir,
-            glyph_scope_key=glyph_scope_key,
             global_glyph_asset_path=asset_context.global_glyph_asset_path,
             global_glyph_map_path=asset_context.global_glyph_map_path,
         )
@@ -2970,6 +2827,7 @@ def build_html_from_svgs(
     asset_hash: Optional[str] = None,
     action_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
+    required_assets: Optional[Set[str]] = None,
 ) -> str:
     with open(config.template_path, "r", encoding="utf-8") as f:
         template = f.read()
@@ -2980,8 +2838,7 @@ def build_html_from_svgs(
     os.makedirs(config.dest_dir, exist_ok=True)
     os.makedirs(page_asset_dir, exist_ok=True)
 
-    glyph_scope = config.glyph_scope_key or config.svg_name_prefix
-    page_links_list, glyph_asset_path, image_asset_names = _process_svg_set(
+    page_links, glyph_asset_path, image_asset_names = _process_svg_set(
         source_dir=output_dir,
         asset_dir=page_asset_dir,
         html_dir=html_dir,
@@ -2993,7 +2850,6 @@ def build_html_from_svgs(
         image_source_dir=config.image_source_dir,
         action_metadata=action_metadata,
         shared_glyphs=config.shared_glyphs,
-        glyph_scope_key=glyph_scope,
         asset_context=config.asset_context,
         page_count_limit=page_count if page_count else None,
         custom_theme_colors=custom_theme_colors,
@@ -3005,7 +2861,7 @@ def build_html_from_svgs(
             keep_filenames=set(image_asset_names.values()),
         )
 
-    primary_pages_html = "\n".join(page_links_list)
+    primary_pages_html = "\n".join(page_links)
     if config.primary_pages_wrapper_class:
         primary_pages_html = (
             f'<div class="{config.primary_pages_wrapper_class}">\n'
@@ -3017,22 +2873,6 @@ def build_html_from_svgs(
         full_pages_html = full_pages_html + "\n" + config.extra_pages_html
 
     index_content = template.replace("{{PAGES}}", full_pages_html)
-    index_content = index_content.replace(
-        "{{INLINE_STYLE}}",
-        (
-            f"<style>{config.asset_context.web_assets.inline_style}</style>"
-            if config.asset_context.web_assets.inline_style
-            else ""
-        ),
-    )
-    index_content = index_content.replace(
-        "{{INLINE_SCRIPT}}",
-        (
-            f"<script>{config.asset_context.web_assets.inline_script}</script>"
-            if config.asset_context.web_assets.inline_script
-            else ""
-        ),
-    )
 
     title = config.default_title
     hidden_text = ""
@@ -3065,53 +2905,31 @@ def build_html_from_svgs(
     index_content = index_content.replace("{{TOPBAR}}", config.top_bar_html)
     index_content = index_content.replace("{{REVISION}}", config.revision_html)
 
-    stylesheet_src = build_root_asset_href(
-        config.asset_context.web_assets.stylesheet_path
-    )
-    clipboard_src = build_root_asset_href(
-        config.asset_context.web_assets.clipboard_script_path
-    )
-    visual_src = build_root_asset_href(config.asset_context.web_assets.visual_script_path)
-    index_content = index_content.replace(
-        "{{STYLESHEET_SRC}}", html.escape(stylesheet_src)
-    )
-    index_content = index_content.replace(
-        "{{CLIPBOARD_SRC}}", html.escape(clipboard_src)
-    )
-    index_content = index_content.replace("{{VISUAL_SRC}}", html.escape(visual_src))
-
-    has_form_inputs = action_metadata and any(
-        k.startswith(_FORM_ACTION_PREFIXES) for k in action_metadata
-    )
-    if has_form_inputs:
-        form_src = build_root_asset_href(
-            config.asset_context.web_assets.form_script_path
-        )
-        form_tag = f'<script defer src="{html.escape(form_src)}"></script>'
-    else:
-        form_tag = ""
-    index_content = index_content.replace("{{FORM_SCRIPT}}", form_tag)
-
-    friends_script_tag = ""
-    if config.load_friends_script:
-        friends_src = build_root_asset_href(
-            config.asset_context.web_assets.friends_script_path
-        )
-        friends_script_tag = f'<script defer src="{html.escape(friends_src)}"></script>'
-    index_content = index_content.replace("{{FRIENDS_SCRIPT}}", friends_script_tag)
-
-    form_hooks_tag = ""
-    if has_form_inputs and config.form_hooks:
-        stub = (
-            "window.form=window.form||{_conds:{},_actions:{},_on:{}};"
-            "form.cond=(i,f)=>{form._conds[i]=f};"
-            "form.action=(i,f)=>{form._actions[i]=f};"
-            "form.on=(i,f)=>{(form._on[i]=form._on[i]||[]).push(f)};\n"
-        )
-        minified_hooks = _minify_js_source(stub + config.form_hooks)
-        if minified_hooks:
-            form_hooks_tag = f"<script>{minified_hooks}</script>"
-    index_content = index_content.replace("{{FORM_HOOKS}}", form_hooks_tag)
+    required = required_assets or set()
+    head_parts: List[str] = []
+    body_parts: List[str] = []
+    for key, asset in config.asset_context.web_assets.items():
+        if key not in required:
+            continue
+        if asset.placement == "head":
+            if asset.href:
+                head_parts.append(
+                    f'<link rel="stylesheet" href="{html.escape(asset.href)}">'
+                )
+            elif asset.kind == "css":
+                head_parts.append(f"<style>{asset.inline}</style>")
+            else:
+                head_parts.append(f"<script>{asset.inline}</script>")
+        else:
+            if key == "form" and config.form_hooks:
+                minified_hooks = _minify_js_source(_FORM_HOOKS_STUB + config.form_hooks)
+                if minified_hooks:
+                    body_parts.append(f"<script>{minified_hooks}</script>")
+            body_parts.append(
+                f'<script defer src="{html.escape(asset.href)}"></script>'
+            )
+    index_content = index_content.replace("{{HEAD_ASSETS}}", "\n".join(head_parts))
+    index_content = index_content.replace("{{BODY_ASSETS}}", "\n".join(body_parts))
 
     rss_feed_link = ""
     if config.rss_feed_path:
@@ -3126,12 +2944,12 @@ def build_html_from_svgs(
     index_content = index_content.replace("{{RSS_FEED_LINK}}", rss_feed_link)
 
     glyph_html = ""
-    warm_glyph_path = (
+    resolved_glyph_path = (
         glyph_asset_path or config.asset_context.global_glyph_asset_path
     )
-    if warm_glyph_path:
-        glyph_src = build_root_asset_href(warm_glyph_path)
-        glyph_symbol_id = _extract_first_glyph_symbol_id(warm_glyph_path)
+    if resolved_glyph_path:
+        glyph_src = build_root_asset_href(resolved_glyph_path)
+        glyph_symbol_id = _extract_first_glyph_symbol_id(resolved_glyph_path)
         if glyph_symbol_id is not None:
             glyph_html = _build_glyph_preload_svg(glyph_src, glyph_symbol_id)
     index_content = index_content.replace("{{GLYPH_PRELOAD}}", glyph_html)
@@ -3251,6 +3069,19 @@ def compile_html(request: CompileBuildRequest) -> str:
             seen_colors.add(key)
             custom_colors.append((key, dark.lower()))
 
+    required_assets: Set[str] = set()
+    for node in _query_nodes_from_source(
+        source_content=request.source_bytes,
+        query_root=os.getcwd(),
+        selector="<driver-assets>",
+        inputs=svg_in,
+    ):
+        value = node.get("value")
+        if isinstance(value, str):
+            required_assets.add(value)
+        elif isinstance(value, list):
+            required_assets.update(v for v in value if isinstance(v, str))
+
     html_config = request.html
     if request.mobile is not None:
         html_dir = os.path.dirname(
@@ -3269,7 +3100,6 @@ def compile_html(request: CompileBuildRequest) -> str:
             image_source_dir=request.html.image_source_dir,
             action_metadata=action_meta,
             shared_glyphs=request.html.shared_glyphs,
-            glyph_scope_key=request.mobile.glyph_scope_key,
             asset_context=request.html.asset_context,
             custom_theme_colors=custom_colors or None,
         )
@@ -3292,4 +3122,5 @@ def compile_html(request: CompileBuildRequest) -> str:
         asset_hash=request.asset_hash,
         action_metadata=action_meta,
         custom_theme_colors=custom_colors or None,
+        required_assets=required_assets,
     )

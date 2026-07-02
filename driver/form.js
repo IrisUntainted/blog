@@ -6,7 +6,7 @@
   const BOUND_COND_DOCS = new WeakSet();
   const SVG_DOCS = new Set();
 
-  const f = window.form = window.form || {_conds: {}, _actions: {}, _on: {}};
+  const form = window.form = window.form || {_conds: {}, _actions: {}, _on: {}};
 
   const initCondElements = (svgDoc) => {
     if (BOUND_COND_DOCS.has(svgDoc)) {
@@ -23,7 +23,7 @@
   };
 
   const evaluateCond = (condId) => {
-    const fn = f._conds[condId];
+    const fn = form._conds[condId];
     return typeof fn === 'function' ? !!fn() : false;
   };
 
@@ -69,14 +69,14 @@
 
   const fireInput = (id, value) => {
     syncValue(id, value);
-    const fns = f._on[id];
+    const fns = form._on[id];
     if (fns) fns.forEach((fn) => fn(value));
     document.dispatchEvent(new CustomEvent('svg-input', {
       detail: {id, value},
     }));
   };
 
-  f.get = (id) => {
+  form.get = (id) => {
     const srInput = SR_INPUTS.get(id);
     if (srInput) return srInput.value;
     const cb = SR_CHECKBOXES.get(id);
@@ -92,7 +92,7 @@
     return entry ? entry.element.value : '';
   };
 
-  f.set = (id, value) => {
+  form.set = (id, value) => {
     const str = String(value);
     const cb = SR_CHECKBOXES.get(id);
     if (cb) {
@@ -114,7 +114,7 @@
     }));
   };
 
-  f.refresh = refreshAllConds;
+  form.refresh = refreshAllConds;
 
   const bindPageObject = (pageObject) => {
     const svgDoc = pageObject.contentDocument;
@@ -143,7 +143,7 @@
     const id = btn.dataset.actionId;
     if (!id) return;
     btn.addEventListener('click', () => {
-      window.execFormAction?.(id);
+      execFormAction(id);
     });
   });
 
@@ -151,7 +151,7 @@
     const id = cb.dataset.checkboxId;
     if (!id) return;
     SR_CHECKBOXES.set(id, cb);
-    f._conds['checkbox:' + id] = () => cb.checked;
+    form._conds['checkbox:' + id] = () => cb.checked;
     cb.addEventListener('change', () => {
       fireInput(id, cb.checked ? 'true' : '');
     });
@@ -162,7 +162,7 @@
     if (!group) return;
     if (!SR_RADIOS.has(group)) SR_RADIOS.set(group, []);
     SR_RADIOS.get(group).push(radio);
-    f._conds['radio:' + group + ':' + radio.value] = () => radio.checked;
+    form._conds['radio:' + group + ':' + radio.value] = () => radio.checked;
     radio.addEventListener('change', () => {
       fireInput(group, radio.value);
     });
@@ -265,16 +265,14 @@
     }
   };
 
-  window.spawnFormInput = spawnInputOverlay;
-
-  window.execFormAction = (id) => {
-    const fn = f._actions[id];
+  const execFormAction = (id) => {
+    const fn = form._actions[id];
     if (typeof fn === 'function') {
       fn();
     }
   };
 
-  window.toggleCheckbox = (id) => {
+  const toggleCheckbox = (id) => {
     const cb = SR_CHECKBOXES.get(id);
     if (cb) {
       cb.checked = !cb.checked;
@@ -282,7 +280,7 @@
     }
   };
 
-  window.selectRadio = (group, value) => {
+  const selectRadio = (group, value) => {
     const radios = SR_RADIOS.get(group);
     if (!radios) return;
     for (const r of radios) {
@@ -290,4 +288,71 @@
     }
     fireInput(group, value);
   };
+
+  const splitRadio = (arg) => {
+    const idx = arg.indexOf(':');
+    if (idx <= 0) return null;
+    const group = arg.slice(0, idx).trim();
+    const value = arg.slice(idx + 1).trim();
+    return group && value ? [group, value] : null;
+  };
+
+  const cycleRadio = (arg, context, event) => {
+    const parsed = splitRadio(arg);
+    if (!parsed) return;
+    const [group, current] = parsed;
+    const svgDocument = context.pageObject.contentDocument;
+    if (!svgDocument) return;
+    const values = [];
+    const firstAnchor = new Map();
+    for (const a of svgDocument.querySelectorAll('a[href^="#action="]')) {
+      const token = window.parseActionHref(a.getAttribute('href') || '');
+      if (!token || token.key !== 'radio') continue;
+      const p = splitRadio(token.arg);
+      if (!p || p[0] !== group || firstAnchor.has(p[1])) continue;
+      firstAnchor.set(p[1], a);
+      values.push(p[1]);
+    }
+    const idx = values.indexOf(current);
+    if (idx < 0) return;
+    const forward = event.key === 'ArrowDown' || event.key === 'ArrowRight';
+    const next = values[forward
+        ? (idx + 1) % values.length
+        : (idx - 1 + values.length) % values.length];
+    firstAnchor.get(next).focus();
+    selectRadio(group, next);
+  };
+
+  const registerSvgAction = window.registerSvgAction;
+  registerSvgAction('input', {
+    press: (id, ctx) =>
+        spawnInputOverlay(id, ctx.anchorNode, ctx.pageObject, ctx.initialKey),
+    keyboard: 'text',
+    arrows: (id, ctx) =>
+        spawnInputOverlay(id, ctx.anchorNode, ctx.pageObject, ctx.initialKey),
+    validate: (id) => id.length > 0,
+  });
+  registerSvgAction('form-action', {
+    press: (id, ctx) => {
+      if (ctx) {
+        const g = ctx.anchorNode.parentElement;
+        g.style.opacity = '0.5';
+        setTimeout(() => { g.style.opacity = ''; }, 150);
+      }
+      execFormAction(id);
+    },
+    validate: (id) => id.length > 0,
+  });
+  registerSvgAction('checkbox', {
+    press: (id) => toggleCheckbox(id),
+    validate: (id) => id.length > 0,
+  });
+  registerSvgAction('radio', {
+    press: (arg) => {
+      const p = splitRadio(arg);
+      if (p) selectRadio(p[0], p[1]);
+    },
+    arrows: cycleRadio,
+    validate: (arg) => splitRadio(arg) !== null,
+  });
 })();

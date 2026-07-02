@@ -2,7 +2,6 @@ import os
 import sys
 from typing import List, Set, Tuple
 
-from .post_entries import is_internal_post_entry
 from .revisions import latest_rev, parse_revision
 from .submission_workspace import resolve_post_meta
 
@@ -11,8 +10,6 @@ def next_revision_name(date_dir: str, workspace_name: str) -> Tuple[int, str]:
 
     existing_dirs: List[int] = []
     for entry_name in os.listdir(date_dir):
-        if is_internal_post_entry(entry_name):
-            continue
         try:
             existing_dirs.append(
                 parse_revision(entry_name, workspace_name)
@@ -59,8 +56,6 @@ def published_workspaces(posts_dir: str) -> List[str]:
         if not os.path.isdir(date_dir):
             continue
         for entry_name in os.listdir(date_dir):
-            if is_internal_post_entry(entry_name):
-                continue
             post_dir = os.path.join(date_dir, entry_name)
             if not os.path.isdir(post_dir):
                 continue

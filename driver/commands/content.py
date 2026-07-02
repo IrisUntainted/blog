@@ -16,21 +16,20 @@ from .shared import (
     refresh_glyphs,
     resolve_base_url,
 )
-from .post_entries import is_internal_post_entry
 from .utils import (
     _ASSET_HASH_LENGTH,
+    _query_nodes_from_source,
     _update_hash_with_typ_files,
     CompileBuildRequest,
     HtmlBuildConfig,
     MobileCompileConfig,
     compile_html,
-    decl_str_from_source,
     extract_friend_card_symbols,
     first_desc,
     hash_text_with_paths,
     make_inputs,
     minify_html,
-    need_decl_str_from_source,
+    query_title_subtitle_from_source,
     reset_dir,
 )
 
@@ -51,8 +50,6 @@ def _append_revision_suffix(post_dir_name: str, title: str) -> str:
 def _collect_day_posts(date_dir: str, date_str: str) -> List[PostEntry]:
     day_posts: List[PostEntry] = []
     for post_dir_name in os.listdir(date_dir):
-        if is_internal_post_entry(post_dir_name):
-            continue
         post_path = os.path.join(date_dir, post_dir_name)
         if not os.path.isdir(post_path):
             continue
@@ -188,6 +185,10 @@ def _build_rss_lines(
     return rss_lines
 
 
+def _is_remote_avatar(avatar: str) -> bool:
+    return avatar.startswith("http://") or avatar.startswith("https://")
+
+
 def _build_friends_hidden_text(
     title: str, subtitle: Optional[str], friends: List[PostEntry]
 ) -> str:
@@ -209,13 +210,13 @@ def _build_friends_hidden_text(
 def _friends_asset_hash(
     source: str,
     template_typ_path: str,
-    friends_json_path: str,
+    friends_data_path: str,
     avatar_paths: List[str],
 ) -> str:
     hasher = hashlib.sha256()
     hasher.update(source.encode("utf-8"))
     _update_hash_with_typ_files(hasher, [template_typ_path])
-    for path in [friends_json_path, *avatar_paths]:
+    for path in [friends_data_path, *avatar_paths]:
         hasher.update(path.encode("utf-8"))
         with open(path, "rb") as f:
             hasher.update(f.read())
@@ -233,13 +234,34 @@ def build_friends_page(
     with open(template_path, "r", encoding="utf-8") as f:
         friends_template = f.read()
 
-    friends_json_path = os.path.join(base_dir, "friends.json")
-    avatars_dir = os.path.join(base_dir, "friends-assets")
-    with open(friends_json_path, "r", encoding="utf-8") as f:
-        friends = json.load(f)
+    # The authored source lives in workspace/ (gitignored, like drafts). A
+    # tracked snapshot under root/ is what the build reads, so a fresh checkout
+    # has the data; `update` refreshes the snapshot from workspace when present.
+    repo_root = os.path.dirname(base_dir)
+    workspace_data = os.path.join(repo_root, "workspace", "friends.typ")
+    workspace_avatars = os.path.join(repo_root, "workspace", "friends-assets")
+    snapshot_dir = os.path.join(root_dir, "friends-source")
+    snapshot_data = os.path.join(snapshot_dir, "friends.typ")
+    snapshot_avatars = os.path.join(snapshot_dir, "friends-assets")
+    if os.path.isfile(workspace_data):
+        os.makedirs(snapshot_dir, exist_ok=True)
+        shutil.copy2(workspace_data, snapshot_data)
+        if os.path.isdir(snapshot_avatars):
+            shutil.rmtree(snapshot_avatars)
+        if os.path.isdir(workspace_avatars):
+            shutil.copytree(workspace_avatars, snapshot_avatars)
 
-    title = need_decl_str_from_source(friends_template, "title")
-    subtitle = decl_str_from_source(friends_template, "subtitle")
+    rel_data = os.path.relpath(snapshot_data, repo_root).replace("\\", "/")
+    query_src = (
+        f'#import "{rel_data}": friends\n'
+      f"[#metadata(friends) <friends-data>]"
+    )
+    nodes = _query_nodes_from_source(
+        query_src, query_root=repo_root, selector="<friends-data>"
+    )
+    friends = nodes[0]["value"] if nodes else []
+
+    title, subtitle = query_title_subtitle_from_source(friends_template, repo_root)
     hidden_text = _build_friends_hidden_text(title, subtitle, friends)
 
     output_dir = os.path.join(build_base, "friends")
@@ -247,14 +269,14 @@ def build_friends_page(
 
     template_typ_path = os.path.join(base_dir, "template.typ")
     avatar_paths = [
-        os.path.join(avatars_dir, friend["avatar"])
+        os.path.join(snapshot_avatars, friend["avatar"])
         for friend in friends
-        if friend.get("avatar")
+        if friend.get("avatar") and not _is_remote_avatar(friend["avatar"])
     ]
     asset_hash = _friends_asset_hash(
         friends_template,
         template_typ_path,
-        friends_json_path,
+        snapshot_data,
         avatar_paths,
     )
 
@@ -288,7 +310,6 @@ def build_friends_page(
                 og_type="website",
                 og_url=og_url,
                 site_base_url=base_url,
-                load_friends_script=True,
             ),
         )
     )
@@ -320,13 +341,11 @@ def update_content(args: Namespace) -> None:
     with open(template_path, "r", encoding="utf-8") as f:
         content_template = f.read()
 
-    parsed_title = need_decl_str_from_source(
-        content_template,
-        "title",
+    parsed_title, parsed_subtitle = query_title_subtitle_from_source(
+        content_template.replace("{{POSTS}}", ""), os.path.dirname(base_dir)
     )
-    parsed_subtitle = need_decl_str_from_source(
-        content_template, "subtitle"
-    )
+    if parsed_subtitle is None:
+        raise RuntimeError("Missing required subtitle declaration in Typst source.")
 
     posts_typst_lines: List[str] = []
     for date_str, day_posts in posts_by_date.items():
@@ -404,8 +423,6 @@ def update_content(args: Namespace) -> None:
         if not os.path.isdir(date_dir):
             continue
         for post_dir_name in os.listdir(date_dir):
-            if is_internal_post_entry(post_dir_name):
-                continue
             post_path = os.path.join(date_dir, post_dir_name)
             if not os.path.isdir(post_path):
                 continue

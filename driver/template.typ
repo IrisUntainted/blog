@@ -9,6 +9,10 @@
 #let _paper_height_input = sys.inputs.at("paper_height", default: none)
 #let _mobile = sys.inputs.at("mobile", default: "false") == "true"
 
+#let _doc(data) = [#metadata(data) <driver-doc>]
+
+#let requires_asset(key) = [#metadata(key) <driver-assets>]
+
 #let justify_align(left_body, right_body) = {
   block(
     width: 100%,
@@ -28,7 +32,7 @@
 }
 
 #let info(body) = {
-  [#metadata((t: "info", b: body)) <driver-doc>]
+  _doc((t: "info", b: body))
   [#block(
     fill: luma(248),
     stroke: (left: 0.18em + luma(120)),
@@ -46,10 +50,26 @@
   caption: [#description],
 )
 
-#let numbered_table(description, ..table_args) = figure(
-  table(..table_args),
-  caption: [#description],
-)
+#let _driver_has_driver() = sys.inputs.at("with_driver", default: "false") == "true"
+#let _driver_is_svg_export() = sys.inputs.at("export_format", default: "svg") == "svg"
+
+#let driver_image_show(it) = {
+  if _driver_is_svg_export() {
+    layout(size => {
+      let dims = measure(block(width: size.width)[
+        #show image: img => img
+        #it
+      ])
+      let alt_part = if it.alt != none { "?alt=" + it.alt } else { "" }
+      link(
+        "driver-image://" + it.source + alt_part,
+        rect(width: dims.width, height: dims.height, fill: none, stroke: none),
+      )
+    })
+  } else {
+    it
+  }
+}
 
 #let base_layout(title: none, page_margin: (x: 1cm, y: 1cm), body) = {
   if title != none {
@@ -81,36 +101,26 @@
 
   set text(font: ("Libertinus Serif", "Songti SC"), size: 12pt)
 
-  show link: it => underline(offset: 2pt, stroke: 0.5pt)[#it]
+  show link: it => underline(stroke: 0.4pt + luma(140), it)
+
+  show figure.caption: it => align(
+    center,
+    text(size: 0.9em, style: "italic", fill: luma(90), it),
+  )
+
+  show quote.where(block: true): it => block(
+    inset: (left: 1.1em, y: 0.2em),
+    stroke: (left: 2pt + luma(190)),
+    width: 100%,
+    text(fill: luma(55), it),
+  )
+
+  show image: driver_image_show
 
   body
 }
 
 #let nav_link(href, body) = link(href)[#body]
-
-#let _driver_has_driver() = sys.inputs.at("with_driver", default: "false") == "true"
-#let _driver_is_svg_export() = sys.inputs.at("export_format", default: "svg") == "svg"
-
-// Rewrites images into a driver-image:// anchor so the SVG post-processing can
-// hash, convert, and bundle them as webp assets. Used by driver.typ and any
-// standalone page (e.g. friends) that renders images.
-#let driver_image_show(it) = {
-  if _driver_is_svg_export() {
-    layout(size => {
-      let dims = measure(block(width: size.width)[
-        #show image: img => img
-        #it
-      ])
-      let alt_part = if it.alt != none { "?alt=" + it.alt } else { "" }
-      link(
-        "driver-image://" + it.source + alt_part,
-        rect(width: dims.width, height: dims.height, fill: none, stroke: none),
-      )
-    })
-  } else {
-    it
-  }
-}
 
 #let right_top_bar(body, svg_only: true) = {
   if svg_only and not _driver_is_svg_export() {
@@ -137,6 +147,7 @@
 }
 
 #let copy_action(body, text, skip_tab: false) = {
+  requires_asset("clipboard")
   show underline: it => it.body
   action(
     "copy:" + bytes-to-hex(sha1(bytes(text))).slice(0, 10),
@@ -150,84 +161,84 @@
   let raw_copy_enabled = _driver_has_driver() and _driver_is_svg_export()
 
   show link: it => {
-    [#metadata((t: "lnk", href: str(it.dest), b: it.body)) <driver-doc>]
+    _doc((t: "lnk", href: str(it.dest), b: it.body))
     it
   }
 
   show strong: it => {
-    [#metadata((t: "b", b: it.body)) <driver-doc>]
+    _doc((t: "b", b: it.body))
     it
   }
 
   show emph: it => {
-    [#metadata((t: "i", b: it.body)) <driver-doc>]
+    _doc((t: "i", b: it.body))
     it
   }
 
   show heading: it => {
-    [#metadata((t: "h", l: it.level, b: it.body)) <driver-doc>]
+    _doc((t: "h", l: it.level, b: it.body))
     it
   }
 
   show par: it => {
-    [#metadata((t: "par", b: it.body)) <driver-doc>]
+    _doc((t: "par", b: it.body))
     it
   }
 
   show figure.where(kind: image): it => {
-    [#metadata((t: "fig", b: it.body, cap: it.caption)) <driver-doc>]
+    _doc((t: "fig", b: it.body, cap: it.caption))
     it
   }
 
   show figure.where(kind: table): it => {
-    [#metadata((t: "fig-t/o", cap: it.caption)) <driver-doc>]
+    _doc((t: "fig-t/o", cap: it.caption))
     it
-    [#metadata((t: "fig-t/c")) <driver-doc>]
+    _doc((t: "fig-t/c"))
   }
 
   show table: it => {
-    [#metadata((t: "table", b: it)) <driver-doc>]
+    _doc((t: "table", b: it))
     it
   }
 
   show list.item: it => {
-    [#metadata((t: "li", b: it.body)) <driver-doc>]
+    _doc((t: "li", b: it.body))
     it
   }
 
   show enum.item: it => {
-    [#metadata((t: "eli", b: it.body)) <driver-doc>]
+    _doc((t: "eli", b: it.body))
     it
   }
 
   show terms.item: it => {
-    [#metadata((t: "dt", term: it.term, b: it.description)) <driver-doc>]
+    _doc((t: "dt", term: it.term, b: it.description))
     it
   }
 
   show footnote: it => {
-    [#metadata((t: "fn", b: it.body)) <driver-doc>]
+    _doc((t: "fn", b: it.body))
     it
   }
 
   show quote.where(block: true): it => {
-    [#metadata((t: "blockquote/o", attr: it.attribution, b: it.body)) <driver-doc>]
+    _doc((t: "blockquote/o", attr: it.attribution, b: it.body))
     it
-    [#metadata((t: "blockquote/c")) <driver-doc>]
+    _doc((t: "blockquote/c"))
   }
 
   show math.equation.where(block: true): it => {
-    [#metadata((t: "eq", alt: it.alt, b: it.body)) <driver-doc>]
+    _doc((t: "eq", alt: it.alt, b: it.body))
     it
   }
 
   show math.equation.where(block: false): it => {
-    [#metadata((t: "eq-il", alt: it.alt, b: it.body)) <driver-doc>]
+    _doc((t: "eq-il", alt: it.alt, b: it.body))
     it
   }
 
   show raw: it => {
-    [#metadata((t: "raw", x: it.text, bl: it.block)) <driver-doc>]
+    _doc((t: "raw", x: it.text, bl: it.block))
     if it.block {
       let content = block(
         fill: luma(245),
@@ -292,6 +303,11 @@
 ) = {
   show: base_layout.with(title: title, page_margin: page_margin)
 
+  requires_asset("stylesheet")
+  requires_asset("visual")
+  requires_asset("inline-style")
+  requires_asset("inline-script")
+
   let back_href = sys.inputs.at("back_href", default: "./index.html")
 
   let default_top_bar = right_top_bar(
@@ -322,19 +338,53 @@
   ]
 }
 
+#let _post_top_bar = right_top_bar[
+  #nav_link("../../../index.html", [Contents]) | #nav_link("meta.html", [Meta]) | #nav_link("post.pdf", [PDF]) | #action("theme", [Theme], label: "Theme")
+]
+
+#let _post_footers = {
+  let edited_date = sys.inputs.at("edited_date", default: none)
+  if edited_date != none {
+    v(1em)
+    set text(size: 10pt, fill: luma(100))
+    align(right)[Edited on #edited_date]
+  }
+  let last_revision_date = sys.inputs.at("last_revision_date", default: none)
+  let last_revision_url = sys.inputs.at("last_revision_url", default: none)
+  if last_revision_date != none and last_revision_url != none and _driver_is_svg_export() {
+    v(1em)
+    set text(size: 10pt, fill: luma(100))
+    align(right)[
+      Last revision on #link(last_revision_url)[#last_revision_date]
+    ]
+  }
+}
+
 #let article(
   title: "Article",
   subtitle: none,
-  date: datetime.today().display(),
+  date: none,
   top_bar: none,
   body,
 ) = {
+  let resolved_date = if date == none {
+    sys.inputs.at("publish_date", default: datetime.today().display())
+  } else {
+    date
+  }
+  let resolved_bar = if top_bar != none {
+    top_bar
+  } else if _driver_has_driver() {
+    _post_top_bar
+  } else {
+    none
+  }
   driver_page(
     title: title,
     subtitle: subtitle,
-    date: date,
-    top_bar: top_bar,
+    date: resolved_date,
+    top_bar: resolved_bar,
     justify: true,
-    body,
+    [#body #_post_footers],
   )
 }

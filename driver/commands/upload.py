@@ -166,13 +166,13 @@ def run_upload(args: Namespace) -> None:
     config_path: str = getattr(args, "config", "")
     config_data = load_config_data(config_path)
 
-    bucket_arg = getattr(args, "bucket", None)
-    if bucket_arg is not None:
-        bucket_name_raw = bucket_arg
-    elif "bucket" in config_data:
-        bucket_name_raw = config_data["bucket"]
-    else:
-        bucket_name_raw = None
+    def _resolve(arg_name, config_key, default):
+        value = getattr(args, arg_name, None)
+        if value is None:
+            value = config_data.get(config_key, default)
+        return value
+
+    bucket_name_raw = _resolve("bucket", "bucket", None)
     bucket_name = str(bucket_name_raw) if bucket_name_raw else ""
     if not bucket_name:
         print(
@@ -181,9 +181,7 @@ def run_upload(args: Namespace) -> None:
         )
         sys.exit(1)
 
-    prefix_raw = getattr(args, "prefix", None)
-    if prefix_raw is None:
-        prefix_raw = config_data["prefix"] if "prefix" in config_data else "blog/"
+    prefix_raw = _resolve("prefix", "prefix", "blog/")
     prefix = str(prefix_raw) if prefix_raw else ""
     if prefix and not prefix.endswith("/"):
         prefix += "/"
@@ -193,13 +191,7 @@ def run_upload(args: Namespace) -> None:
         f"Uploading '{root_dir}' directory to GCS bucket '{bucket_name}' under prefix '{prefix}'..."
     )
 
-    project_arg = getattr(args, "project", None)
-    if project_arg is not None:
-        project_id_raw = project_arg
-    elif "project" in config_data:
-        project_id_raw = config_data["project"]
-    else:
-        project_id_raw = None
+    project_id_raw = _resolve("project", "project", None)
     project_id = str(project_id_raw) if project_id_raw else ""
     client = storage.Client(project=project_id) if project_id else storage.Client()
     bucket = client.bucket(bucket_name)

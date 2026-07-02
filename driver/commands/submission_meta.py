@@ -107,9 +107,7 @@ def _build_meta_typst_source(
         )
         for placeholder, field_name in placeholders.items()
     }
-    post_subtitle = (
-        meta_fields["Post Subtitle"] if "Post Subtitle" in meta_fields else None
-    )
+    post_subtitle = meta_fields.get("Post Subtitle")
     replacements["{{POST_SUBTITLE}}"] = (
         f'raw("{_escape_typst_string(post_subtitle)}", block: false)'
         if post_subtitle is not None
@@ -188,7 +186,6 @@ def compile_meta_page(request: MetaPageRequest) -> None:
                 typst_inputs=typst_inputs,
                 mobile=MobileCompileConfig(
                     svg_name_prefix="m-meta-page",
-                    glyph_scope_key="meta-mobile",
                 ),
                 html=HtmlBuildConfig(
                     template_path=os.path.join(request.base_dir, "index.template.html"),

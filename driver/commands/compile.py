@@ -27,8 +27,7 @@ from .utils import (
     build_page_head_title,
     compile_html,
     first_desc,
-    decl_str_from_source,
-    need_decl_str_from_source,
+    query_title_subtitle,
     prev_rev,
     make_temp_dir,
     make_inputs,
@@ -134,7 +133,7 @@ def _prepare_compile_sources(
         hash_paths.append(form_typ_path)
     asset_hash = sources_hash(hash_paths)
     driver_source = driver_source.replace(
-        "// IMPORT_MAIN", f'#import "{main_typ_path}": *'
+        "// IMPORT_MAIN", f'#include "{main_typ_path}"'
     )
     return PreparedCompileSources(
         driver_source_bytes=driver_source.encode(),
@@ -218,14 +217,9 @@ def _stage_workspace_for_compile(
 
 
 def _resolve_workspace_path(
-    args: Namespace,
     workspace_base: str,
     workspace_name: str,
 ) -> str:
-    workspace_path = getattr(args, "workspace_path_override", None)
-    if workspace_path is not None:
-        return workspace_path
-
     workspace_path = safe_join_child(workspace_base, workspace_name)
     if not os.path.exists(workspace_path):
         print(f"Workspace '{workspace_name}' does not exist.", file=sys.stderr)
@@ -234,51 +228,33 @@ def _resolve_workspace_path(
 
 
 def _resolve_compile_output_dirs(
-    args: Namespace,
     build_base: str,
     workspace_name: str,
 ) -> CompileOutputDirs:
-    output_dir_override = getattr(args, "output_dir_override", None)
-    html_output_dir_override = getattr(args, "html_output_dir_override", None)
-    public_output_dir_override = getattr(args, "public_output_dir_override", None)
-
-    if output_dir_override is None:
-        if html_output_dir_override is None:
-            os.makedirs(build_base, exist_ok=True)
-            html_output_dir = safe_join_child(build_base, workspace_name)
-        else:
-            html_output_dir = os.path.abspath(str(html_output_dir_override))
-        output_dir = safe_join_child(html_output_dir, "assets")
-        reset_dir(html_output_dir)
-    else:
-        output_dir = os.path.abspath(str(output_dir_override))
-        html_output_dir = (
-            os.path.abspath(str(html_output_dir_override))
-            if html_output_dir_override is not None
-            else os.path.dirname(output_dir)
-        )
-        reset_dir(output_dir)
-
-    public_output_dir = (
-        os.path.abspath(str(public_output_dir_override))
-        if public_output_dir_override is not None
-        else html_output_dir
-    )
-    os.makedirs(html_output_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(public_output_dir, exist_ok=True)
+    os.makedirs(build_base, exist_ok=True)
+    html_output_dir = safe_join_child(build_base, workspace_name)
+    asset_output_dir = safe_join_child(html_output_dir, "assets")
+    reset_dir(html_output_dir)
+    public_output_dir = html_output_dir
+    os.makedirs(asset_output_dir, exist_ok=True)
     return CompileOutputDirs(
-        asset_output_dir=output_dir,
+        asset_output_dir=asset_output_dir,
         html_output_dir=html_output_dir,
         public_output_dir=public_output_dir,
     )
 
 
-def run_compile(args: Namespace) -> None:
-    workspace_base: str = args.workspace_base
+def run_compile(
+    args: Namespace,
+    *,
+    workspace_path: Optional[str] = None,
+    publish_date: Optional[str] = None,
+    output_dirs: Optional[CompileOutputDirs] = None,
+) -> None:
     build_base: str = args.build_base
     workspace_name: str = args.name
-    workspace_path = _resolve_workspace_path(args, workspace_base, workspace_name)
+    if workspace_path is None:
+        workspace_path = _resolve_workspace_path(args.workspace_base, workspace_name)
     staged_workspace = _stage_workspace_for_compile(
         workspace_path,
         repo_root=os.getcwd(),
@@ -287,9 +263,15 @@ def run_compile(args: Namespace) -> None:
     workspace_path = staged_workspace.path
 
     try:
-        output_dirs = _resolve_compile_output_dirs(
-            args, build_base, workspace_name
-        )
+        if output_dirs is None:
+            output_dirs = _resolve_compile_output_dirs(build_base, workspace_name)
+        else:
+            for d in (
+                output_dirs.asset_output_dir,
+                output_dirs.html_output_dir,
+                output_dirs.public_output_dir,
+            ):
+                os.makedirs(d, exist_ok=True)
 
         base_dir = driver_dir()
         asset_context = build_asset_ctx(base_dir, args.root_dir)
@@ -297,19 +279,15 @@ def run_compile(args: Namespace) -> None:
             base_dir,
             workspace_path,
         )
-        with open(compile_sources.main_typ_path, "r", encoding="utf-8") as f:
-            main_typ_source = f.read()
-        post_title = need_decl_str_from_source(main_typ_source, "title")
-        post_subtitle = decl_str_from_source(main_typ_source, "subtitle")
+        post_title, post_subtitle = query_title_subtitle(
+            compile_sources.main_typ_path, query_root=os.getcwd()
+        )
 
         posts_dir = os.path.join(args.root_dir, "posts")
         skip_latest = getattr(args, "amend", False)
-        publish_date = getattr(args, "publish_date_override", None)
         edited_date = None
         if skip_latest:
-            edited_date = getattr(
-                args, "edited_date_override", None
-            ) or _workspace_latest_modified_date(workspace_path)
+            edited_date = _workspace_latest_modified_date(workspace_path)
         last_revision_date, last_revision_url = prev_rev(
             posts_dir,
             workspace_name,

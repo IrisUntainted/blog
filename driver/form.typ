@@ -1,12 +1,13 @@
-#import "template.typ": action, _driver_has_driver, _driver_is_svg_export
+#import "template.typ": action, requires_asset, _driver_has_driver, _driver_is_svg_export
 
 #let input_field(id, placeholder: "Type here", width: auto) = {
+  requires_asset("form")
   show underline: it => it.body
   action(
     "input:" + id,
     box(
       width: width,
-      baseline: 0.4em,
+      baseline: 0.1em,
       stroke: 0.5pt + luma(120),
       radius: 0.2em,
       inset: (x: 0.5em, y: 0.4em),
@@ -20,6 +21,7 @@
 }
 
 #let form_button(id, body) = {
+  requires_asset("form")
   show underline: it => it.body
   action(
     "form-action:" + id,
@@ -42,8 +44,8 @@
       let w = calc.max(s0.width, s1.width)
       let h = calc.max(s0.height, s1.height)
       box(width: w, height: h)[
-        #link("#cond=" + id + ":0")[#if_false]
-        #place(top + left)[#link("#cond=" + id + ":1")[#if_true]]
+        #box[#link("#cond=" + id + ":0")[#if_false]]
+        #place(top + left)[#box[#link("#cond=" + id + ":1")[#if_true]]]
       ]
     }
   } else {
@@ -64,10 +66,11 @@
 }
 
 #let checkbox(id, body) = {
+  requires_asset("form")
   show underline: it => it.body
   action(
     "checkbox:" + id,
-    [#box(baseline: 0.2em)[#cond(
+    [#box(baseline: 0.1em)[#cond(
       "checkbox:" + id,
       _check_indicator(false),
       _check_indicator(true),
@@ -90,10 +93,11 @@
 }
 
 #let radio(group, value, body) = {
+  requires_asset("form")
   show underline: it => it.body
   action(
     "radio:" + group + ":" + value,
-    [#box(baseline: 0.2em)[#cond(
+    [#box(baseline: 0.1em)[#cond(
       "radio:" + group + ":" + value,
       _radio_indicator(false),
       _radio_indicator(true),

@@ -32,7 +32,6 @@
     if (uses.length === n) {
       uses.forEach((use, slotIdx) => writeHref(use, "#card-" + perm[slotIdx]));
     }
-    // Reveal the (now shuffled) cards — they start hidden to avoid a flash.
     svgDoc.documentElement.style.setProperty("--friend-cards", "visible");
   };
 

@@ -55,11 +55,11 @@ def _render_table_html(table_rows: List[List[Dict[str, Any]]]) -> str:
         return ""
 
     header_row = table_rows[0]
-    has_header = len(table_rows) > 1 and bool(header_row)
-    for cell in header_row:
-        if int(cell["rowspan"]) != 1:
-            has_header = False
-            break
+    has_header = (
+        len(table_rows) > 1
+        and bool(header_row)
+        and all(int(cell["rowspan"]) == 1 for cell in header_row)
+    )
 
     html_parts: List[str] = ["<table>"]
 
@@ -502,6 +502,15 @@ def build_hidden_text(
         skipped_pars = 0
         trailing_residual: Optional[str] = None
 
+        def render_table(table_node: Any) -> Optional[str]:
+            if not isinstance(table_node, dict):
+                return None
+            try:
+                rows = _extract_typst_table_rows(table_node)
+                return _render_table_html(rows) or None
+            except Exception:
+                return None
+
         for node in nodes:
             t = node.get("t")
 
@@ -584,7 +593,6 @@ def build_hidden_text(
 
             if t in ("raw", "b", "i") and not node.get("bl"):
                 continue
-                continue
 
             if t in ("ul", "ol"):
                 item_tag = "li" if t == "ul" else "eli"
@@ -635,46 +643,34 @@ def build_hidden_text(
                 )
 
             elif t == "fig-t":
-                cap = node.get("cap")
                 table_child = next(
                     (c for c in node.get("children", []) if c.get("t") == "table"),
                     None,
                 )
                 if table_child is not None:
-                    table_node = table_child.get("b")
-                    if isinstance(table_node, dict):
-                        try:
-                            rows = _extract_typst_table_rows(table_node)
-                            table_html = _render_table_html(rows)
-                            if table_html:
-                                if cap is not None and isinstance(cap, dict):
-                                    label = fig_label(cap, "table")
-                                    body_text = flatten_doc_node_to_html(
-                                        cap.get("body", ""), emphasis_map, site_base_url
-                                    )
-                                    caption = re.sub(
-                                        r"\s+", " ", f"{label} {body_text}"
-                                    ).strip()
-                                    parts.append(
-                                        f"<figure>{table_html}"
-                                        f"<figcaption>{caption}</figcaption>"
-                                        f"</figure>"
-                                    )
-                                else:
-                                    parts.append(table_html)
-                        except Exception:
-                            pass
+                    table_html = render_table(table_child.get("b"))
+                    if table_html:
+                        cap = node.get("cap")
+                        if cap is not None and isinstance(cap, dict):
+                            label = fig_label(cap, "table")
+                            body_text = flatten_doc_node_to_html(
+                                cap.get("body", ""), emphasis_map, site_base_url
+                            )
+                            caption = re.sub(
+                                r"\s+", " ", f"{label} {body_text}"
+                            ).strip()
+                            parts.append(
+                                f"<figure>{table_html}"
+                                f"<figcaption>{caption}</figcaption>"
+                                f"</figure>"
+                            )
+                        else:
+                            parts.append(table_html)
 
             elif t == "table":
-                table_node = node.get("b")
-                if isinstance(table_node, dict):
-                    try:
-                        rows = _extract_typst_table_rows(table_node)
-                        table_html = _render_table_html(rows)
-                        if table_html:
-                            parts.append(table_html)
-                    except Exception:
-                        pass
+                table_html = render_table(node.get("b"))
+                if table_html:
+                    parts.append(table_html)
 
             elif t == "h":
                 level = min(node.get("l", 1) + 1, 6)

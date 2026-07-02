@@ -3,6 +3,5 @@ __pycache__/
 workspace/
 build/
 config.json
-.amend-workspace-*
 .playwright-cli/
 .driver.lock

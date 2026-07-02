@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 from .utils import (
     DriverAssetContext,
-    DriverWebAssets,
     WEB_ASSETS_DIR_NAME,
     GLOBAL_GLYPH_ASSET_FILENAME,
     GLOBAL_GLYPH_MAP_FILENAME,

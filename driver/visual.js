@@ -6,13 +6,6 @@
   const DESKTOP_LAYOUT = 'desktop';
   const MOBILE_LAYOUT = 'mobile';
   const ACTION_PREFIX = '#action=';
-  const COPY_ACTION_PREFIX = 'copy:';
-  const THEME_ACTION = 'theme';
-  const LAYOUT_ACTION = 'layout';
-  const INPUT_ACTION_PREFIX = 'input:';
-  const FORM_ACTION_PREFIX = 'form-action:';
-  const CHECKBOX_PREFIX = 'checkbox:';
-  const RADIO_PREFIX = 'radio:';
   const BOUND_SVG_DOCUMENTS = new WeakSet();
   const SVG_COLOR_TOKENS = [
     '--svg-paper-bg',
@@ -95,120 +88,46 @@
 
   const readAnchorHref = (anchorNode) => anchorNode.getAttribute('href') || '';
 
-  const parseActionPayload = (actionPayload) => {
-    const segments = actionPayload.split('|')
-                         .map((segment) => segment.trim())
-                         .filter((segment) => segment.length > 0);
-    if (segments.length === 0) {
-      return {actionToken: '', metadata: {}};
-    }
-
-    const actionToken = segments[0];
-    const metadata = {};
-    for (const segment of segments.slice(1)) {
-      const separatorIndex = segment.indexOf(':');
-      if (separatorIndex <= 0) {
-        continue;
-      }
-      const key = segment.slice(0, separatorIndex).trim().toLowerCase();
-      const value = segment.slice(separatorIndex + 1).trim();
-      if (!key || !value) {
-        continue;
-      }
-      metadata[key] = value;
-    }
-    return {actionToken, metadata};
+  const actionHandlers = new Map();
+  const registerSvgAction = (key, spec) => {
+    actionHandlers.set(key, spec);
   };
+  window.registerSvgAction = registerSvgAction;
 
-  const parseSvgAction = (href) => {
+  const parseActionToken = (href) => {
     if (!href.startsWith(ACTION_PREFIX)) {
       return null;
     }
-    let actionPayload = href.slice(ACTION_PREFIX.length);
+    let payload = href.slice(ACTION_PREFIX.length);
     try {
-      actionPayload = decodeURIComponent(actionPayload);
+      payload = decodeURIComponent(payload);
     } catch {
       // Keep the raw payload when decoding fails.
     }
-
-    const {actionToken} = parseActionPayload(actionPayload);
-    if (actionToken === THEME_ACTION) {
-      return {type: THEME_ACTION};
+    const segments = payload.split('|')
+        .map((segment) => segment.trim())
+        .filter((segment) => segment.length > 0);
+    if (segments.length === 0) {
+      return null;
     }
-    if (actionToken === LAYOUT_ACTION) {
-      return {type: LAYOUT_ACTION};
-    }
-    if (actionToken.startsWith(COPY_ACTION_PREFIX)) {
-      const uid = actionToken.slice(COPY_ACTION_PREFIX.length).trim();
-      if (uid) {
-        return {type: 'copy', uid};
-      }
-    }
-    if (actionToken.startsWith(INPUT_ACTION_PREFIX)) {
-      const id = actionToken.slice(INPUT_ACTION_PREFIX.length).trim();
-      if (id) {
-        return {type: 'input', id};
-      }
-    }
-    if (actionToken.startsWith(FORM_ACTION_PREFIX)) {
-      const id = actionToken.slice(FORM_ACTION_PREFIX.length).trim();
-      if (id) {
-        return {type: 'form-action', id};
-      }
-    }
-    if (actionToken.startsWith(CHECKBOX_PREFIX)) {
-      const id = actionToken.slice(CHECKBOX_PREFIX.length).trim();
-      if (id) {
-        return {type: 'checkbox', id};
-      }
-    }
-    if (actionToken.startsWith(RADIO_PREFIX)) {
-      const rest = actionToken.slice(RADIO_PREFIX.length);
-      const colonIdx = rest.indexOf(':');
-      if (colonIdx > 0) {
-        const group = rest.slice(0, colonIdx).trim();
-        const value = rest.slice(colonIdx + 1).trim();
-        if (group && value) {
-          return {type: 'radio', group, value};
-        }
-      }
-    }
-    return null;
+    const token = segments[0];
+    const colonIdx = token.indexOf(':');
+    return colonIdx < 0
+        ? {key: token, arg: ''}
+        : {key: token.slice(0, colonIdx).trim(), arg: token.slice(colonIdx + 1).trim()};
   };
+  window.parseActionHref = parseActionToken;
 
-  const executeSvgAction = (action, context) => {
-    if (action.type === THEME_ACTION) {
-      window.toggleColorTheme?.();
-      return;
+  const parseSvgAction = (href) => {
+    const token = parseActionToken(href);
+    if (!token) {
+      return null;
     }
-    if (action.type === LAYOUT_ACTION) {
-      window.toggleLayout?.();
-      return;
+    const spec = actionHandlers.get(token.key);
+    if (!spec || (spec.validate && !spec.validate(token.arg))) {
+      return null;
     }
-    if (action.type === 'copy') {
-      void window.copyCode?.(action.uid);
-      return;
-    }
-    if (action.type === 'input' && context) {
-      window.spawnFormInput?.(action.id, context.anchorNode, context.pageObject, context.initialKey);
-      return;
-    }
-    if (action.type === 'form-action') {
-      if (context) {
-        const g = context.anchorNode.parentElement;
-        g.style.opacity = '0.5';
-        setTimeout(() => { g.style.opacity = ''; }, 150);
-      }
-      window.execFormAction?.(action.id);
-      return;
-    }
-    if (action.type === 'checkbox') {
-      window.toggleCheckbox?.(action.id);
-      return;
-    }
-    if (action.type === 'radio') {
-      window.selectRadio?.(action.group, action.value);
-    }
+    return {spec, arg: token.arg};
   };
 
   const bindSvgActionsToObject = (pageObject) => {
@@ -227,21 +146,18 @@
       if (!anchorNode) {
         return;
       }
-
       const action = parseSvgAction(readAnchorHref(anchorNode));
       if (!action) {
         return;
       }
-
       event.preventDefault();
-      executeSvgAction(action, {anchorNode, pageObject});
+      action.spec.press(action.arg, {anchorNode, pageObject});
     });
 
     svgDocument.addEventListener('keydown', (event) => {
       const isActivation = event.key === ' ' || event.key === 'Spacebar' || event.key === 'Enter';
       const isPrintable = event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey;
-      const isInputNav = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
-      const isArrowNav = isInputNav || event.key === 'ArrowUp' || event.key === 'ArrowDown';
+      const isArrowNav = event.key.startsWith('Arrow');
       if (!isActivation && !isPrintable && !isArrowNav) {
         return;
       }
@@ -257,36 +173,26 @@
       if (!action) {
         return;
       }
-      if (isPrintable && !isActivation && action.type !== 'input') {
-        return;
-      }
-      if (isArrowNav && action.type === 'radio') {
+      const {spec, arg} = action;
+      const context = {
+        anchorNode,
+        pageObject,
+        initialKey: isPrintable && !isActivation ? event.key : undefined,
+      };
+      if (isActivation) {
         event.preventDefault();
-        const prefix = ACTION_PREFIX + RADIO_PREFIX + action.group + ':';
-        const allAnchors = [...svgDocument.querySelectorAll('a[href^="' + CSS.escape(prefix) + '"]')];
-        const values = [];
-        const firstAnchor = new Map();
-        for (const a of allAnchors) {
-          const ra = parseSvgAction(readAnchorHref(a));
-          if (ra && ra.type === 'radio' && !firstAnchor.has(ra.value)) {
-            firstAnchor.set(ra.value, a);
-            values.push(ra.value);
-          }
-        }
-        const idx = values.indexOf(action.value);
-        if (idx < 0) return;
-        const forward = event.key === 'ArrowDown' || event.key === 'ArrowRight';
-        const nextIdx = forward ? (idx + 1) % values.length : (idx - 1 + values.length) % values.length;
-        const nextValue = values[nextIdx];
-        firstAnchor.get(nextValue).focus();
-        window.selectRadio?.(action.group, nextValue);
+        spec.press(arg, context);
         return;
       }
-      if (isArrowNav && action.type !== 'input') {
+      if (isPrintable && spec.keyboard === 'text') {
+        event.preventDefault();
+        spec.press(arg, context);
         return;
       }
-      event.preventDefault();
-      executeSvgAction(action, {anchorNode, pageObject, initialKey: isPrintable ? event.key : undefined});
+      if (isArrowNav && spec.arrows) {
+        event.preventDefault();
+        spec.arrows(arg, context, event);
+      }
     });
   };
 
@@ -328,18 +234,20 @@
         initializePageObject(pageObject);
       });
 
-  window.toggleColorTheme = () => {
+  const toggleColorTheme = () => {
     const nextTheme =
         getCurrentTheme() === DARK_THEME ? LIGHT_THEME : DARK_THEME;
     applyTheme(nextTheme, true);
   };
+  window.toggleColorTheme = toggleColorTheme;
 
-  window.setColorTheme = (theme) => {
+  const setColorTheme = (theme) => {
     if (theme !== LIGHT_THEME && theme !== DARK_THEME) {
       return;
     }
     applyTheme(theme, true);
   };
+  window.setColorTheme = setColorTheme;
 
   const resolveLayout = (layout) =>
       (layout === MOBILE_LAYOUT ? MOBILE_LAYOUT : DESKTOP_LAYOUT);
@@ -376,18 +284,23 @@
   const getCurrentLayout = () =>
       resolveLayout(document.documentElement.getAttribute('data-layout'));
 
-  window.toggleLayout = () => {
+  const toggleLayout = () => {
     const nextLayout =
         getCurrentLayout() === MOBILE_LAYOUT ? DESKTOP_LAYOUT : MOBILE_LAYOUT;
     applyLayout(nextLayout, true);
   };
+  window.toggleLayout = toggleLayout;
 
-  window.setLayout = (layout) => {
+  const setLayout = (layout) => {
     if (layout !== DESKTOP_LAYOUT && layout !== MOBILE_LAYOUT) {
       return;
     }
     applyLayout(layout, true);
   };
+  window.setLayout = setLayout;
+
+  registerSvgAction('theme', {press: () => toggleColorTheme()});
+  registerSvgAction('layout', {press: () => toggleLayout()});
 
   const initialTheme = getSavedTheme() || getPreferredTheme();
   applyTheme(initialTheme);

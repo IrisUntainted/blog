@@ -7,7 +7,7 @@ from argparse import Namespace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from .compile import run_compile
+from .compile import CompileOutputDirs, run_compile
 from .content import update_content
 from .shared import (
     build_asset_ctx,
@@ -37,11 +37,10 @@ from .submission_workspace import (
     write_manifest,
 )
 from .utils import (
-    decl_str_from_source,
     first_desc,
-    need_decl_str_from_source,
     make_temp_dir,
     minify_html,
+    query_title_subtitle,
     safe_join_child,
 )
 
@@ -110,13 +109,17 @@ def _submit_to_destination(
         compile_args = Namespace(**vars(args))
         compile_args.name = workspace_name
         compile_args.amend = amend_mode
-        compile_args.workspace_path_override = stage_path
-        compile_args.publish_date_override = date_str
         compile_args.shared_glyphs = False
-        compile_args.output_dir_override = dest_assets_dir
-        compile_args.html_output_dir_override = dest_dir
-        compile_args.public_output_dir_override = dest_dir
-        run_compile(compile_args)
+        run_compile(
+            compile_args,
+            workspace_path=stage_path,
+            publish_date=date_str,
+            output_dirs=CompileOutputDirs(
+                asset_output_dir=dest_assets_dir,
+                html_output_dir=dest_dir,
+                public_output_dir=dest_dir,
+            ),
+        )
 
         base_dir = driver_dir()
         asset_context = build_asset_ctx(base_dir, args.root_dir)
@@ -124,11 +127,9 @@ def _submit_to_destination(
         source_dest_dir = os.path.join(dest_dir, "source")
         sync_snapshot(stage_path, source_dest_dir)
 
-        main_typ_path = os.path.join(stage_path, "main.typ")
-        with open(main_typ_path, "r", encoding="utf-8") as f:
-            main_typ_source = f.read()
-        post_title = need_decl_str_from_source(main_typ_source, "title")
-        post_subtitle = decl_str_from_source(main_typ_source, "subtitle")
+        post_title, post_subtitle = query_title_subtitle(
+            os.path.join(stage_path, "main.typ"), query_root=os.getcwd()
+        )
         pdf_name, post_asset_hash = extract_post_pdf_name(dest_dir)
 
         meta_generated_at: Optional[str] = None

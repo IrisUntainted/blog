@@ -8,9 +8,7 @@
     {{OGP_METADATA}}
     <title>{{TITLE}}</title>
     {{GLYPH_PRELOAD}}
-    {{INLINE_STYLE}}
-    {{INLINE_SCRIPT}}
-    <link rel="stylesheet" href="{{STYLESHEET_SRC}}">
+    {{HEAD_ASSETS}}
     {{RSS_FEED_LINK}}
 </head>
 
@@ -21,11 +19,7 @@
         </article>
         {{PAGES}}
     </main>
-    <script defer src="{{VISUAL_SRC}}"></script>
-    <script defer src="{{CLIPBOARD_SRC}}"></script>
-    {{FORM_HOOKS}}
-    {{FORM_SCRIPT}}
-    {{FRIENDS_SCRIPT}}
+    {{BODY_ASSETS}}
     <!-- FCP/LCP trigger for Lighthouse -->
     <div aria-hidden="true" style="position: absolute; z-index: -1; top: 100px; opacity: 0.01;">You caught me!</div>
 </body>

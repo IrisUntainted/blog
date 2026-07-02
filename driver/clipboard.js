@@ -59,7 +59,7 @@
     }
   };
 
-  window.copyCode = async (uid) => {
+  const copyCode = async (uid) => {
     const node = document.getElementById('raw-' + uid);
     const text = node?.textContent || '';
     if (!text) {
@@ -68,4 +68,9 @@
     const copied = await copyText(text);
     showToast(copied ? 'Copied' : 'Copy failed');
   };
+
+  window.registerSvgAction('copy', {
+    press: (uid) => { void copyCode(uid); },
+    validate: (uid) => uid.length > 0,
+  });
 })();
