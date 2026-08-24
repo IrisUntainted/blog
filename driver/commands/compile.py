@@ -147,6 +147,10 @@ def _replace_required_pattern(
     pattern: str,
     replacement: str,
 ) -> str:
+    # Targeted string substitution (not a full lxml round-trip): lxml.html
+    # re-encodes entities like &#x27; -> ' across the whole document, which would
+    # alter the rest of the assembled page. Substituting only the matched meta/
+    # title fragment preserves the document byte-for-byte outside the edit.
     updated_html, replaced = re.subn(pattern, replacement, html_content, count=1)
     if replaced != 1:
         raise RuntimeError("Expected exactly one replacement match in article HTML.")

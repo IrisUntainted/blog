@@ -314,12 +314,6 @@ def build_friends_page(
         )
     )
 
-    # Lift each rendered card into a <symbol> sprite referenced by a shufflable
-    # <use>; runs after compile_html so the SVGs are in final (svgo'd) form.
-    for pattern in (f"friends[0-9]*.{asset_hash}.svg", f"m-friends[0-9]*.{asset_hash}.svg"):
-        for svg_path in glob.glob(os.path.join(root_dir, "assets", pattern)):
-            extract_friend_card_symbols(svg_path)
-
 
 def update_content(args: Namespace) -> None:
     base_dir = driver_dir()
@@ -436,9 +430,14 @@ def update_content(args: Namespace) -> None:
 
     refresh_glyphs(
         root_dir=root_dir,
-        target_dirs=glyph_target_dirs,
-        clean_global_store=True,
+        target_dirs=glyph_target_dirs
     )
+    # Lift friend cards into <symbol>s after glyph hoisting, so the hidden card
+    # <use>s (revealed by friends.js) are never run through svgo's
+    # removeHiddenElems during refresh.
+    for pattern in ("friends[0-9]*.svg", "m-friends[0-9]*.svg"):
+        for svg_path in glob.glob(os.path.join(root_dir, "assets", pattern)):
+            extract_friend_card_symbols(svg_path)
     minify_html(os.path.join(root_dir, "index.html"))
 
     sitemap_lines = _build_sitemap_lines(base_url, posts_by_date)

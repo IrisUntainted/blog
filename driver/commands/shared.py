@@ -30,12 +30,11 @@ def build_asset_ctx(driver_dir: str, root_dir: str) -> DriverAssetContext:
 
 def refresh_glyphs(
     root_dir: str,
-    target_dirs: List[str],
-    clean_global_store: bool = False,
+    target_dirs: List[str]
 ) -> None:
     glyph_asset_path = apply_glyph_map(
         root_dir=root_dir,
-        target_dirs=target_dirs,
+        target_dirs=target_dirs
     )
 
     if glyph_asset_path:
@@ -56,8 +55,7 @@ def refresh_glyphs(
 
     clean_glyph_assets(
         root_dir=root_dir,
-        target_dirs=target_dirs,
-        clean_global_store=clean_global_store,
+        target_dirs=target_dirs
     )
 
 

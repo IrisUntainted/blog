@@ -12,7 +12,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from lxml import etree
+
 from .revisions import list_revisions
+from . import xmlutil
 
 
 _typst_path: Optional[str] = None
@@ -57,11 +60,6 @@ _SVGO_GLYPH_CONFIG_PATH = os.path.join(
 )
 GLOBAL_GLYPH_ASSET_FILENAME = "glyphs.svg"
 GLOBAL_GLYPH_MAP_FILENAME = "glyph-map.json"
-_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
-_DESCRIPTION_BLOCK_PATTERN = re.compile(
-    r"<(blockquote|p|pre|figcaption|li)\b([^>]*)>(.*?)</\1>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
 _SENTENCE_PATTERN = re.compile(r".+?(?:[.!?](?=\s|$)|$)")
 _SVG_THEME_FILL_CLASS_MAP: Dict[str, str] = {
     "#fff": "theme-paper-bg",
@@ -267,19 +265,6 @@ def make_inputs(
     return TypstInputs(svg=svg, pdf=pdf)
 
 
-def _append_svg_class(attrs: str, class_name: str) -> str:
-    class_match = re.search(r'\sclass="([^"]*)"', attrs)
-    if class_match:
-        class_names = [name for name in class_match.group(1).split() if name]
-        if class_name not in class_names:
-            class_names.append(class_name)
-        replacement = f' class="{" ".join(class_names)}"'
-        return attrs[: class_match.start()] + replacement + attrs[class_match.end() :]
-    if re.search(r"/\s*$", attrs):
-        return re.sub(r"/\s*$", f' class="{class_name}" /', attrs)
-    return f'{attrs} class="{class_name}"'
-
-
 def _custom_theme_color_class(light_hex: str) -> str:
     return f"tc-{light_hex.lstrip('#')}"
 
@@ -305,42 +290,31 @@ def _inject_svg_theme_classes(
     if custom_colors:
         extra_fill, extra_stroke = _build_custom_theme_maps(custom_colors)
 
-    def _rewrite_tag(match: re.Match) -> str:
-        tag = match.group(1)
-        attrs = match.group(2)
-        if not attrs:
-            return match.group(0)
-
+    root = xmlutil.parse_svg(svg_data)
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
         classes: List[str] = []
-        attrs_to_remove: Set[str] = set()
-
-        def _classify(attr_name, static_map, extra_map):
-            attr_match = re.search(
-                rf'\s{attr_name}="([^"]+)"', attrs, flags=re.IGNORECASE
-            )
-            if not attr_match:
-                return
-            value = attr_match.group(1).strip().lower()
+        for attr_name, static_map, extra_map in (
+            ("fill", _SVG_THEME_FILL_CLASS_MAP, extra_fill),
+            ("stroke", _SVG_THEME_STROKE_CLASS_MAP, extra_stroke),
+        ):
+            raw = el.get(attr_name)
+            if raw is None:
+                continue
+            value = raw.strip().lower()
             cls = static_map.get(value) or extra_map.get(value)
             if cls:
                 classes.append(cls)
-                attrs_to_remove.add(attr_name)
-
-        _classify("fill", _SVG_THEME_FILL_CLASS_MAP, extra_fill)
-        _classify("stroke", _SVG_THEME_STROKE_CLASS_MAP, extra_stroke)
-
-        if not classes:
-            return match.group(0)
-
-        attrs_alt = "|".join(sorted(attrs_to_remove))
-        updated_attrs = re.sub(
-            rf'\s(?:{attrs_alt})="[^"]*"', "", attrs, flags=re.IGNORECASE
-        )
-        for class_name in classes:
-            updated_attrs = _append_svg_class(updated_attrs, class_name)
-        return f"<{tag}{updated_attrs}>"
-
-    return re.sub(r"<([A-Za-z][\w:.-]*)([^>]*)>", _rewrite_tag, svg_data)
+                xmlutil.del_attr_local(el, attr_name)
+        if classes:
+            existing = el.get("class")
+            tokens = existing.split() if existing else []
+            for cls in classes:
+                if cls not in tokens:
+                    tokens.append(cls)
+            el.set("class", " ".join(tokens))
+    return xmlutil.serialize_svg(root)
 
 
 def _inject_svg_theme_style(
@@ -423,17 +397,27 @@ def first_desc(
         for text in (skip_texts or [])
         if text and text.strip()
     }
-    for block_match in _DESCRIPTION_BLOCK_PATTERN.finditer(html_fragment):
-        block_tag = (block_match.group(1) or "").lower()
-        block_attrs = block_match.group(2) or ""
-        if block_tag == "p" and re.search(
-            r'\bclass\s*=\s*"[^"]*\b(?:subtitle|post-nav)\b', block_attrs
+    block_tags = ("blockquote", "p", "pre", "figcaption", "li")
+    doc = xmlutil.parse_html(html_fragment)
+    for el in doc.iter():
+        if not (isinstance(el.tag, str) and el.tag in block_tags):
+            continue
+        # itertext() on the outer block already emits nested text, so
+        # re-visiting an inner block would double-count it.
+        ancestor = el.getparent()
+        while ancestor is not None and not (
+            isinstance(ancestor.tag, str) and ancestor.tag in block_tags
+        ):
+            ancestor = ancestor.getparent()
+        if ancestor is not None:
+            continue
+
+        if el.tag == "p" and re.search(
+            r"\b(?:subtitle|post-nav)\b", el.get("class") or ""
         ):
             continue
 
-        block_text = _HTML_TAG_PATTERN.sub(" ", block_match.group(3))
-        block_text = html.unescape(block_text)
-        block_text = re.sub(r"\s+", " ", block_text).strip()
+        block_text = " ".join(" ".join(el.itertext()).split())
         if not block_text:
             continue
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", block_text):
@@ -1232,23 +1216,16 @@ def _extract_first_glyph_symbol_id(glyph_asset_path: str) -> Optional[str]:
 
     try:
         with open(glyph_asset_path, "r", encoding="utf-8") as f:
-            glyph_content = f.read()
+            root = xmlutil.parse_svg(f.read())
     except (OSError, UnicodeDecodeError):
         return None
 
-    symbol_match = _SVG_SYMBOL_PATTERN.search(glyph_content)
-    if not symbol_match:
+    symbol = next(xmlutil.iter_local(root, "symbol"), None)
+    if symbol is None:
         return None
 
-    symbol_attrs = symbol_match.group(1)
-    symbol_id_match = _SVG_ID_ATTR_PATTERN.search(symbol_attrs)
-    if not symbol_id_match:
-        return None
-
-    symbol_id = symbol_id_match.group(1).strip()
-    if not symbol_id:
-        return None
-    return symbol_id
+    symbol_id = (symbol.get("id") or "").strip()
+    return symbol_id or None
 
 
 def _build_glyph_preload_svg(glyph_src: str, glyph_symbol_id: str) -> str:
@@ -1276,27 +1253,35 @@ def rewrite_glyph_preload(html_path: str, glyph_asset_path: str) -> bool:
     glyph_symbol_id = _extract_first_glyph_symbol_id(glyph_asset_path)
     if glyph_symbol_id is None:
         return False
-    glyph_ref = html.escape(f"{glyph_src}#{glyph_symbol_id}", quote=True)
+    glyph_ref = f"{glyph_src}#{glyph_symbol_id}"
 
-    updated_html = _GLYPH_PRELOAD_USE_HREF_PATTERN.sub(
-        lambda match: f"{match.group(1)}{glyph_ref}{match.group(2)}",
-        html_content,
-        count=1,
+    doc = xmlutil.parse_html(html_content)
+    preload = next(
+        (e for e in doc.iter()
+         if isinstance(e.tag, str) and e.get("data-glyph-preload") == "true"),
+        None,
     )
-    if updated_html == html_content:
-        if _GLYPH_PRELOAD_SVG_PATTERN.search(html_content):
+    if preload is not None:
+        use = next(xmlutil.iter_local(preload, "use"), None)
+        if use is None or use.get("href") == glyph_ref:
             return False
-        body_match = _HTML_BODY_OPEN_TAG_PATTERN.search(html_content)
-        if body_match is None:
-            return False
-        preload_svg = _build_glyph_preload_svg(glyph_src, glyph_symbol_id)
-        insert_at = body_match.end()
-        updated_html = (
-            f"{html_content[:insert_at]}\n{preload_svg}\n{html_content[insert_at:]}"
+        use.set("href", glyph_ref)
+    else:
+        body = next(
+            (e for e in doc.iter() if isinstance(e.tag, str) and e.tag == "body"),
+            None,
         )
+        if body is None:
+            return False
+        preload_el = xmlutil.parse_html(
+            _build_glyph_preload_svg(glyph_src, glyph_symbol_id)
+        )
+        preload_el.tail = "\n" + (body.text or "")
+        body.text = "\n"
+        body.insert(0, preload_el)
 
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(updated_html)
+        f.write(xmlutil.serialize_html(doc))
     return True
 
 
@@ -1307,62 +1292,6 @@ def _is_generated_svg(filename: str, svg_name_prefix: str = "page") -> bool:
             filename,
         )
     )
-
-
-_SVG_DEFS_PATTERN = re.compile(r"<defs>(.*?)</defs>", flags=re.DOTALL)
-_SVG_SYMBOL_PATTERN = re.compile(r"<symbol\b([^>]*)>(.*?)</symbol>", flags=re.DOTALL)
-_SVG_ID_ATTR_PATTERN = re.compile(r'\s+id="([^"]+)"')
-_SVG_WHITESPACE_PATTERN = re.compile(r"\s+")
-_HTML_BODY_OPEN_TAG_PATTERN = re.compile(r"<body\b[^>]*>", flags=re.IGNORECASE)
-_GLYPH_PRELOAD_SVG_PATTERN = re.compile(
-    r"<svg\b(?=[^>]*\bdata-glyph-preload\s*=\s*['\"]true['\"])[^>]*>.*?</svg>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_GLYPH_PRELOAD_USE_HREF_PATTERN = re.compile(
-    r"(<svg\b(?=[^>]*\bdata-glyph-preload\s*=\s*['\"]true['\"])[^>]*>.*?<use\b[^>]*\b(?:xlink:)?href\s*=\s*['\"])[^'\"]*(['\"])",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-
-def _sanitize_asset_prefix_component(value: str) -> str:
-    sanitized = re.sub(r"[^A-Za-z0-9-]+", "-", value.strip().lower())
-    sanitized = re.sub(r"-+", "-", sanitized).strip("-")
-    return sanitized
-
-
-def _to_base36(value: int) -> str:
-    if value <= 0:
-        return "0"
-
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    output: List[str] = []
-    current = value
-    while current:
-        current, remainder = divmod(current, 36)
-        output.append(digits[remainder])
-    return "".join(reversed(output))
-
-
-def _canonical_symbol_fingerprint(attrs_without_id: str, body: str) -> str:
-    normalized_attrs = _SVG_WHITESPACE_PATTERN.sub(" ", attrs_without_id).strip()
-    normalized_body = body.strip()
-    if normalized_attrs:
-        return f"<symbol {normalized_attrs}>{normalized_body}</symbol>"
-    return f"<symbol>{normalized_body}</symbol>"
-
-
-def _short_id_to_index(short_id: str) -> int:
-    if not short_id.startswith("g"):
-        return 0
-
-    raw = short_id[1:]
-    if not raw:
-        return 0
-
-    try:
-        return int(raw, 36)
-    except ValueError:
-        return 0
 
 
 def _load_global_glyph_registry(map_path: str) -> Dict[str, Any]:
@@ -1398,10 +1327,14 @@ def _load_global_glyph_registry(map_path: str) -> Dict[str, Any]:
 
 
 def _allocate_next_short_id(registry: Dict[str, Any]) -> str:
-    next_short_index = registry["next_short_index"]
-    short_id = f"g{_to_base36(next_short_index)}"
-    registry["next_short_index"] = next_short_index + 1
-    return short_id
+    index = registry["next_short_index"]
+    registry["next_short_index"] = index + 1
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    parts: List[str] = []
+    while index:
+        index, remainder = divmod(index, 36)
+        parts.append(digits[remainder])
+    return f"g{''.join(reversed(parts))}"
 
 
 def _resolve_global_short_id(
@@ -1461,7 +1394,7 @@ def _resolve_global_short_id(
 
 
 def _render_glyph_svg(symbols: Dict[str, Dict[str, str]]) -> str:
-    ordered_short_ids = sorted(symbols.keys(), key=_short_id_to_index)
+    ordered_short_ids = sorted(symbols.keys(), key=lambda sid: int(sid[1:], 36))
     glyph_symbols: List[str] = []
     for short_id in ordered_short_ids:
         symbol = symbols[short_id]
@@ -1477,67 +1410,42 @@ def _render_glyph_svg(symbols: Dict[str, Dict[str, str]]) -> str:
     )
 
 
-def _write_global_glyph_registry(map_path: str, registry: Dict[str, Any]) -> None:
-    payload: Dict[str, Any] = {
-        "next_short_index": registry["next_short_index"],
-        "symbols": registry["symbols"],
-        "fingerprint_to_short": registry["fingerprint_to_short"],
-        "typst_id_to_short": registry["typst_id_to_short"],
-    }
-
-    with open(map_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        f.write("\n")
-
-
 def _extract_svg_symbols(
     svg_data: str,
-) -> Optional[Tuple[str, List[Tuple[str, str, str]]]]:
-    defs_match = _SVG_DEFS_PATTERN.search(svg_data)
-    if not defs_match:
+) -> Optional[List[Tuple[str, str, str]]]:
+    root = xmlutil.parse_svg(svg_data)
+    defs = next(xmlutil.iter_local(root, "defs"), None)
+    if defs is None:
         return None
 
-    defs_block = defs_match.group(0)
-    defs_inner = defs_match.group(1)
     symbols: List[Tuple[str, str, str]] = []
-
-    for symbol_match in _SVG_SYMBOL_PATTERN.finditer(defs_inner):
-        attrs = symbol_match.group(1)
-        body = symbol_match.group(2)
-
-        id_match = _SVG_ID_ATTR_PATTERN.search(attrs)
-        if not id_match:
+    for sym in xmlutil.iter_local(defs, "symbol"):
+        local_id = sym.get("id")
+        if local_id is None:
             continue
-
-        local_id = id_match.group(1)
-        attrs_without_id = _SVG_ID_ATTR_PATTERN.sub("", attrs, count=1)
+        attrs_without_id = "".join(
+            f' {k}="{v}"' for k, v in sym.attrib.items() if k != "id"
+        )
+        body = xmlutil.inner_xml(sym)
         symbols.append((local_id, attrs_without_id, body))
 
-    return defs_block, symbols
+    return symbols
 
 
 def _extract_wrapped_global_short_id(symbol_body: str) -> Optional[str]:
-    use_match = re.fullmatch(
-        r'\s*<use\b[^>]*(?:xlink:)?href="([^"]+)"[^>]*/?>\s*(?:</use>)?\s*',
-        symbol_body,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if not use_match:
+    use = xmlutil.parse_svg(symbol_body)
+    if not (isinstance(use.tag, str) and xmlutil.local(use.tag) == "use"):
         return None
 
-    href_value = use_match.group(1)
-    if "#" not in href_value:
+    href_value = xmlutil.attr_local(use, "href")
+    if not href_value or "#" not in href_value:
         return None
 
     href_path, short_id = href_value.rsplit("#", 1)
-    if not short_id:
+    if not short_id or not href_path:
         return None
 
-    if not href_path:
-        return None
-
-    href_path_without_query = href_path.split("?", 1)[0]
-    href_basename = os.path.basename(href_path_without_query)
+    href_basename = os.path.basename(href_path.split("?", 1)[0])
     if href_basename != GLOBAL_GLYPH_ASSET_FILENAME and not re.fullmatch(
         r"glyphs\.[0-9a-f]{6}\.svg",
         href_basename,
@@ -1550,41 +1458,34 @@ def _extract_wrapped_global_short_id(symbol_body: str) -> Optional[str]:
 def _extract_and_rewrite_shared_svg_glyphs(
     svg_paths: List[str],
     global_glyph_asset_path: str,
-    global_glyph_map_path: str,
+    global_glyph_map_path: str
 ) -> Optional[str]:
     if not svg_paths:
         return None
 
     registry = _load_global_glyph_registry(global_glyph_map_path)
 
-    page_symbol_maps: List[Tuple[str, str, str, List[Tuple[str, str, str]]]] = []
+    page_symbol_maps: List[Tuple[str, str, List[Tuple[str, str]]]] = []
 
     for svg_path in svg_paths:
         with open(svg_path, "r", encoding="utf-8") as svg_file:
             svg_data = svg_file.read()
 
-        extracted = _extract_svg_symbols(svg_data)
-        if not extracted:
-            continue
-
-        defs_block, symbols = extracted
+        symbols = _extract_svg_symbols(svg_data)
         if not symbols:
             continue
 
-        local_symbol_map: List[Tuple[str, str, str]] = []
+        local_symbol_map: List[Tuple[str, str]] = []
         for local_id, attrs_without_id, body in symbols:
             wrapped_short_id = _extract_wrapped_global_short_id(body)
             if wrapped_short_id:
                 existing_symbols: Dict[str, Dict[str, str]] = registry["symbols"]
                 if wrapped_short_id in existing_symbols:
-                    local_symbol_map.append(
-                        (local_id, attrs_without_id, wrapped_short_id)
-                    )
+                    local_symbol_map.append((local_id, wrapped_short_id))
                     continue
 
-            symbol_fingerprint = _canonical_symbol_fingerprint(attrs_without_id, body)
             fingerprint_digest = hashlib.sha1(
-                symbol_fingerprint.encode("utf-8")
+                f"{' '.join(attrs_without_id.split())}\n{body.strip()}".encode("utf-8")
             ).hexdigest()
 
             short_id = _resolve_global_short_id(
@@ -1594,9 +1495,9 @@ def _extract_and_rewrite_shared_svg_glyphs(
                 attrs_without_id=attrs_without_id,
                 body=body,
             )
-            local_symbol_map.append((local_id, attrs_without_id, short_id))
+            local_symbol_map.append((local_id, short_id))
 
-        page_symbol_maps.append((svg_path, svg_data, defs_block, local_symbol_map))
+        page_symbol_maps.append((svg_path, svg_data, local_symbol_map))
 
     if not page_symbol_maps:
         return None
@@ -1605,51 +1506,47 @@ def _extract_and_rewrite_shared_svg_glyphs(
     if not symbols:
         return None
     glyph_svg = _render_glyph_svg(symbols)
-    glyph_asset_seed_path = os.path.abspath(global_glyph_asset_path)
-    glyph_asset_dir = os.path.dirname(glyph_asset_seed_path)
-    glyph_asset_seed_name = os.path.basename(glyph_asset_seed_path)
-    glyph_asset_prefix, glyph_asset_suffix = os.path.splitext(glyph_asset_seed_name)
-    sanitized_prefix = _sanitize_asset_prefix_component(glyph_asset_prefix)
-    if not sanitized_prefix:
-        sanitized_prefix = "glyphs"
-    if not glyph_asset_suffix:
-        glyph_asset_suffix = ".svg"
-
     glyph_asset_path = _write_hashed_asset(
-        asset_dir=glyph_asset_dir,
-        prefix=sanitized_prefix,
-        suffix=glyph_asset_suffix,
+        asset_dir=os.path.dirname(os.path.abspath(global_glyph_asset_path)),
+        prefix="glyphs",
+        suffix=".svg",
         content=glyph_svg,
         remove_stale=False,
     )
     os.makedirs(os.path.dirname(global_glyph_map_path), exist_ok=True)
-    _write_global_glyph_registry(global_glyph_map_path, registry)
+    with open(global_glyph_map_path, "w", encoding="utf-8") as f:
+        json.dump(registry, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        f.write("\n")
 
-    for svg_path, svg_data, defs_block, local_symbol_map in page_symbol_maps:
+    for svg_path, svg_data, local_symbol_map in page_symbol_maps:
         glyph_href = build_root_asset_href(glyph_asset_path)
-        wrapper_symbols: List[str] = []
-        seen_local_ids: Set[str] = set()
+        short_by_id: Dict[str, str] = {}
+        for local_id, short_id in local_symbol_map:
+            short_by_id.setdefault(local_id, short_id)
 
-        for local_id, attrs_without_id, short_id in local_symbol_map:
-            if local_id in seen_local_ids:
-                continue
-            seen_local_ids.add(local_id)
-
-            wrapper_symbols.append(
-                f'<symbol id="{local_id}"{attrs_without_id}'
-                f'><use href="{glyph_href}#{short_id}"/></symbol>'
-            )
-
-        rewritten_defs = f"<defs>{''.join(wrapper_symbols)}</defs>"
-        updated_svg_data = svg_data.replace(defs_block, rewritten_defs, 1)
+        root = xmlutil.parse_svg(svg_data)
+        defs = next(xmlutil.iter_local(root, "defs"), None)
+        if defs is not None:
+            for sym in list(xmlutil.iter_local(defs, "symbol")):
+                short_id = short_by_id.get(sym.get("id") or "")
+                if short_id is None:
+                    continue
+                for child in list(sym):
+                    sym.remove(child)
+                sym.text = None
+                use = etree.SubElement(sym, xmlutil.namespaced(sym, "use"))
+                use.set("href", f"{glyph_href}#{short_id}")
 
         with open(svg_path, "w", encoding="utf-8") as svg_file:
-            svg_file.write(updated_svg_data)
+            svg_file.write(xmlutil.serialize_svg(root))
 
     return glyph_asset_path
 
 
-def apply_glyph_map(root_dir: str, target_dirs: List[str]) -> Optional[str]:
+def apply_glyph_map(
+    root_dir: str,
+    target_dirs: List[str]
+) -> Optional[str]:
     assets_dir = safe_join_child(root_dir, WEB_ASSETS_DIR_NAME)
     glyph_asset_path = os.path.join(assets_dir, GLOBAL_GLYPH_ASSET_FILENAME)
     glyph_map_path = os.path.join(assets_dir, GLOBAL_GLYPH_MAP_FILENAME)
@@ -1664,6 +1561,8 @@ def apply_glyph_map(root_dir: str, target_dirs: List[str]) -> Optional[str]:
                 or _is_generated_svg(filename, "m-page")
                 or _is_generated_svg(filename, "meta-page")
                 or _is_generated_svg(filename, "m-meta-page")
+                or _is_generated_svg(filename, "friends")
+                or _is_generated_svg(filename, "m-friends")
             ):
                 svg_paths.append(os.path.join(directory, filename))
 
@@ -1673,7 +1572,7 @@ def apply_glyph_map(root_dir: str, target_dirs: List[str]) -> Optional[str]:
     glyph_result = _extract_and_rewrite_shared_svg_glyphs(
         svg_paths,
         global_glyph_asset_path=glyph_asset_path,
-        global_glyph_map_path=glyph_map_path,
+        global_glyph_map_path=glyph_map_path
     )
 
     for svg_path in svg_paths:
@@ -1710,8 +1609,7 @@ def _is_root_asset_referenced(root_dir: str, asset_filename: str) -> bool:
 
 def clean_glyph_assets(
     root_dir: str,
-    target_dirs: List[str],
-    clean_global_store: bool = False,
+    target_dirs: List[str]
 ) -> int:
     cleaned_count = 0
 
@@ -1732,8 +1630,7 @@ def clean_glyph_assets(
 
         for filename in os.listdir(asset_dir):
             is_stale_global_glyph = (
-                clean_global_store
-                and is_root_assets_dir
+                is_root_assets_dir
                 and bool(re.fullmatch(r"glyphs\.[0-9a-f]{6}\.svg", filename))
                 and not _is_root_asset_referenced(root_dir, filename)
             )
@@ -1758,95 +1655,56 @@ def clean_glyph_assets(
 
 
 def _normalize_svg_href_attributes(svg_content: str) -> str:
-    def _normalize_tag(match: re.Match) -> str:
-        tag = match.group(0)
-        has_xlink_href = bool(re.search(r"\bxlink:href\s*=", tag, flags=re.IGNORECASE))
-        if not has_xlink_href:
-            return tag
-
-        has_plain_href = bool(re.search(r"(?<!:)\bhref\s*=", tag, flags=re.IGNORECASE))
-        if has_plain_href:
-            tag = re.sub(
-                r"\s+xlink:href\s*=\s*(['\"])[^'\"]*\1",
-                "",
-                tag,
-                flags=re.IGNORECASE,
-            )
-
-        return re.sub(r"\bxlink:href\b", "href", tag, flags=re.IGNORECASE)
-
-    return re.sub(r"<[^>]+>", _normalize_tag, svg_content)
+    root = xmlutil.parse_svg(svg_content)
+    xlink_key = f"{{{xmlutil.XLINK_NS}}}href"
+    for el in root.iter():
+        if not isinstance(el.tag, str) or xlink_key not in el.attrib:
+            continue
+        if "href" in el.attrib:
+            del el.attrib[xlink_key]
+        else:
+            items = list(el.attrib.items())
+            el.attrib.clear()
+            for key, val in items:
+                el.attrib["href" if key == xlink_key else key] = val
+    return xmlutil.serialize_svg(root)
 
 
 def _strip_typst_classes(svg_content: str) -> str:
-    def _rewrite_class_attr(match: re.Match) -> str:
-        quote = match.group("quote")
-        class_value = match.group("value")
-        class_names = [
-            class_name
-            for class_name in class_value.split()
-            if class_name and not class_name.startswith("typst-")
-        ]
-        if not class_names:
-            return ""
-        return f" class={quote}{' '.join(class_names)}{quote}"
-
-    return re.sub(
-        r"\s+class\s*=\s*(?P<quote>['\"])(?P<value>[^'\"]*)(?P=quote)",
-        _rewrite_class_attr,
-        svg_content,
-    )
+    root = xmlutil.parse_svg(svg_content)
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        class_value = el.get("class")
+        if class_value is None:
+            continue
+        kept = [c for c in class_value.split() if not c.startswith("typst-")]
+        if kept:
+            el.set("class", " ".join(kept))
+        else:
+            del el.attrib["class"]
+    return xmlutil.serialize_svg(root)
 
 
 def _prepare_anchor_hrefs_for_svgo(svg_content: str) -> str:
-    inserted_xlink_href = False
-
-    def _prepare_anchor_tag(match: re.Match) -> str:
-        nonlocal inserted_xlink_href
-        attrs = match.group(1)
-
-        if re.search(r"\bxlink:href\s*=", attrs, flags=re.IGNORECASE):
-            return match.group(0)
-
-        href_match = re.search(r"(?<!:)\bhref\s*=", attrs, flags=re.IGNORECASE)
-        if not href_match:
-            return match.group(0)
-
-        inserted_xlink_href = True
-        prepared_attrs = re.sub(
-            r"(?<!:)\bhref\s*=",
-            "xlink:href=",
-            attrs,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-        return f"<a{prepared_attrs}>"
-
-    prepared_svg = re.sub(r"<a([^>]*)>", _prepare_anchor_tag, svg_content)
-    if not inserted_xlink_href:
-        return prepared_svg
-
-    if re.search(r"<svg\b[^>]*\bxmlns:xlink\s*=", prepared_svg, flags=re.IGNORECASE):
-        return prepared_svg
-
-    return re.sub(
-        r"(<svg\b[^>]*)(>)",
-        r'\1 xmlns:xlink="http://www.w3.org/1999/xlink"\2',
-        prepared_svg,
-        count=1,
-        flags=re.IGNORECASE,
-    )
+    root = xmlutil.parse_svg(svg_content)
+    xlink_key = f"{{{xmlutil.XLINK_NS}}}href"
+    inserted = False
+    for el in xmlutil.iter_local(root, "a"):
+        if xlink_key in el.attrib or "href" not in el.attrib:
+            continue
+        el.attrib[xlink_key] = el.attrib.pop("href")
+        inserted = True
+    if inserted:
+        root = xmlutil.declare_namespace(root, "xlink", xmlutil.XLINK_NS)
+    return xmlutil.serialize_svg(root)
 
 
-def _extract_anchor_href(attrs: str) -> Optional[str]:
-    href_match = re.search(
-        r"\s+(?:xlink:)?href\s*=\s*['\"](?P<href>[^'\"]+)['\"]",
-        attrs,
-        flags=re.IGNORECASE,
-    )
-    if href_match is None:
+def _extract_anchor_href(el) -> Optional[str]:
+    href = xmlutil.attr_local(el, "href")
+    if href is None:
         return None
-    href = href_match.group("href").strip()
+    href = href.strip()
     return href if href else None
 
 
@@ -2006,14 +1864,6 @@ def _infer_index_href_label(href: str) -> Optional[str]:
     return "Contents"
 
 
-_HTML_TITLE_TAG_PATTERN = re.compile(
-    r"<title\b[^>]*>(?P<title>.*?)</title>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_HTML_H1_TAG_PATTERN = re.compile(
-    r"<h1\b[^>]*>(?P<title>.*?)</h1>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
 _HTML_TITLE_CACHE: Dict[str, Optional[str]] = {}
 
 
@@ -2026,14 +1876,21 @@ def _read_html_title(html_path: str) -> Optional[str]:
         return None
 
     with open(html_path, "r", encoding="utf-8") as html_file:
-        html_data = html_file.read()
+        doc = xmlutil.parse_html(html_file.read())
 
-    match = _HTML_H1_TAG_PATTERN.search(html_data) or _HTML_TITLE_TAG_PATTERN.search(html_data)
-    if match is None:
+    target = next(
+        (e for e in doc.iter() if isinstance(e.tag, str) and e.tag == "h1"), None
+    )
+    if target is None:
+        target = next(
+            (e for e in doc.iter() if isinstance(e.tag, str) and e.tag == "title"),
+            None,
+        )
+    if target is None:
         _HTML_TITLE_CACHE[html_path] = None
         return None
 
-    title = html.unescape(" ".join(match.group("title").split())).strip()
+    title = " ".join("".join(target.itertext()).split()).strip()
     _HTML_TITLE_CACHE[html_path] = title or None
     return _HTML_TITLE_CACHE[html_path]
 
@@ -2200,19 +2057,16 @@ def _inject_svg_anchor_accessibility(
     action_metadata: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
     seen_action_hrefs: set = set()
-
-    def _rewrite_anchor(match: re.Match) -> str:
-        attrs = match.group("attrs")
-        body = match.group("body")
-        href = _extract_anchor_href(attrs)
+    root = xmlutil.parse_svg(svg_data)
+    for el in list(xmlutil.iter_local(root, "a")):
+        href = _extract_anchor_href(el)
 
         if href and href.strip().startswith(_COND_HREF_PREFIX):
-            rewritten = attrs
-            if not re.search(r"\s+tabindex\s*=", attrs, flags=re.IGNORECASE):
-                rewritten += ' tabindex="-1"'
-            if not re.search(r"\s+aria-hidden\s*=", attrs, flags=re.IGNORECASE):
-                rewritten += ' aria-hidden="true"'
-            return f"<a{rewritten}>{body}</a>"
+            if "tabindex" not in el.attrib:
+                el.set("tabindex", "-1")
+            if "aria-hidden" not in el.attrib:
+                el.set("aria-hidden", "true")
+            continue
 
         label = _infer_svg_anchor_label(
             href,
@@ -2221,26 +2075,14 @@ def _inject_svg_anchor_accessibility(
             action_metadata=action_metadata,
         )
         if label is None:
-            return match.group(0)
+            continue
 
-        rewritten_attrs = attrs
         action_token, _ = _parse_svg_action_href(href)
         role, tabindex = _infer_svg_anchor_attrs(action_token, action_metadata)
-        has_role = (
-            re.search(r"\s+role\s*=\s*['\"][^'\"]+['\"]", attrs, flags=re.IGNORECASE)
-            is not None
-        )
-        if role is not None and not has_role:
-            rewritten_attrs += f' role="{html.escape(role, quote=True)}"'
+        if role is not None and "role" not in el.attrib:
+            el.set("role", role)
 
-        has_tabindex = (
-            re.search(
-                r"\s+tabindex\s*=\s*['\"][^'\"]*['\"]",
-                attrs,
-                flags=re.IGNORECASE,
-            )
-            is not None
-        )
+        has_tabindex = "tabindex" in el.attrib
         action_href = href.strip() if href else ""
         if action_href.startswith(_ACTION_HREF_PREFIX) and not has_tabindex:
             if action_href in seen_action_hrefs:
@@ -2248,40 +2090,25 @@ def _inject_svg_anchor_accessibility(
             seen_action_hrefs.add(action_href)
 
         if tabindex is not None and not has_tabindex:
-            rewritten_attrs += f' tabindex="{html.escape(tabindex, quote=True)}"'
+            el.set("tabindex", tabindex)
 
-        has_explicit_name = (
-            re.search(r"\s+aria-label\s*=\s*['\"][^'\"]+['\"]", attrs, flags=re.IGNORECASE)
-            is not None
-            or re.search(
-                r"\s+aria-labelledby\s*=\s*['\"][^'\"]+['\"]",
-                attrs,
-                flags=re.IGNORECASE,
-            )
-            is not None
-        )
-        if not has_explicit_name:
-            rewritten_attrs += f' aria-label="{html.escape(label, quote=True)}"'
+        if "aria-label" not in el.attrib and "aria-labelledby" not in el.attrib:
+            el.set("aria-label", label)
 
-        if (
-            is_external_href(href or "", site_base_url)
-            and not re.search(r"\s+rel\s*=", attrs, flags=re.IGNORECASE)
+        if is_external_href(href or "", site_base_url) and "rel" not in el.attrib:
+            el.set("rel", "noopener noreferrer")
+
+        if not any(
+            isinstance(c.tag, str) and xmlutil.local(c.tag) == "title" for c in el
         ):
-            rewritten_attrs += ' rel="noopener noreferrer"'
+            title_el = etree.Element(xmlutil.namespaced(el, "title"))
+            title_el.text = label
+            if el.text:
+                title_el.tail = el.text
+                el.text = None
+            el.insert(0, title_el)
 
-        rewritten_body = body
-        has_title_node = re.search(r"<title\b[^>]*>", body, flags=re.IGNORECASE) is not None
-        if not has_title_node:
-            rewritten_body = f"<title>{html.escape(label)}</title>{body}"
-
-        return f"<a{rewritten_attrs}>{rewritten_body}</a>"
-
-    return re.sub(
-        r"<a(?P<attrs>[^>]*)>(?P<body>.*?)</a>",
-        _rewrite_anchor,
-        svg_data,
-        flags=re.DOTALL,
-    )
+    return xmlutil.serialize_svg(root)
 
 
 def _normalize_svg_href_file(
@@ -2384,29 +2211,39 @@ def _replace_driver_image_anchors(
     asset_hash: str,
     image_asset_names: Dict[str, str],
 ) -> str:
-    def _rewrite(match: re.Match) -> str:
-        attrs = match.group("attrs")
-        body = match.group("body")
+    def _make_image(ref, href, width, height, role, alt=None):
+        img = etree.Element(xmlutil.namespaced(ref, "image"))
+        img.set("href", href)
+        img.set("width", width)
+        img.set("height", height)
+        img.set("role", role)
+        if alt:
+            img.set("aria-label", alt)
+        return img
 
-        href_match = re.search(r"(?:xlink:)?href\s*=\s*['\"]([^'\"]+)['\"]", attrs)
-        if href_match is None:
-            return match.group(0)
-        href = href_match.group(1)
+    def _replace(el, img):
+        img.tail = el.tail
+        el.getparent().replace(el, img)
 
-        w_h = re.search(
-            r'<rect\b[^>]*\bwidth=["\']([^"\']+)["\'][^>]*\bheight=["\']([^"\']+)["\']',
-            body,
+    root = xmlutil.parse_svg(svg_data)
+    for el in list(xmlutil.iter_local(root, "a")):
+        href = xmlutil.attr_local(el, "href")
+        if href is None:
+            continue
+        rect = next(
+            (
+                c for c in el.iter()
+                if isinstance(c.tag, str)
+                and xmlutil.local(c.tag) == "rect"
+                and c.get("width") is not None
+                and c.get("height") is not None
+            ),
+            None,
         )
-        h_w = re.search(
-            r'<rect\b[^>]*\bheight=["\']([^"\']+)["\'][^>]*\bwidth=["\']([^"\']+)["\']',
-            body,
-        )
-        if w_h:
-            width, height = w_h.group(1), w_h.group(2)
-        elif h_w:
-            width, height = h_w.group(2), h_w.group(1)
-        else:
-            return match.group(0)
+        if rect is None:
+            continue
+        width = rect.get("width")
+        height = rect.get("height")
 
         # Remote avatar: leave the URL intact so the browser loads it on visit.
         if href.startswith(_REMOTE_IMAGE_PREFIX):
@@ -2416,21 +2253,15 @@ def _replace_driver_image_anchors(
             if alt_idx != -1:
                 alt = rest[alt_idx + len("?alt="):]
                 rest = rest[:alt_idx]
-            url = rest
-            if alt:
-                return (
-                    f'<image href="{html.escape(url, quote=True)}"'
-                    f' width="{width}" height="{height}" role="img"'
-                    f' aria-label="{html.escape(alt, quote=True)}"/>'
-                )
-            return (
-                f'<image href="{html.escape(url, quote=True)}"'
-                f' width="{width}" height="{height}" role="presentation"/>'
+            _replace(
+                el,
+                _make_image(el, rest, width, height, "img" if alt else "presentation", alt),
             )
+            continue
 
         parsed = urlparse(href)
         if parsed.scheme != "driver-image":
-            return match.group(0)
+            continue
 
         image_rel = unquote(parsed.netloc + parsed.path)
         alt_values = parse_qs(parsed.query).get("alt", [])
@@ -2439,7 +2270,7 @@ def _replace_driver_image_anchors(
         src_path = os.path.join(image_source_dir, image_rel)
         if not os.path.isfile(src_path):
             print(f"driver-image: source not found: {src_path!r}", file=sys.stderr)
-            return match.group(0)
+            continue
 
         webp_name = image_asset_names.get(image_rel)
         if webp_name is None:
@@ -2453,61 +2284,31 @@ def _replace_driver_image_anchors(
             with open(src_path, "rb") as f:
                 _convert_to_webp(f.read(), dst_path)
 
-        if alt:
-            return (
-                f'<image href="{webp_name}" width="{width}" height="{height}"'
-                f' role="img" aria-label="{html.escape(alt, quote=True)}"/>'
-            )
-        return f'<image href="{webp_name}" width="{width}" height="{height}" role="presentation"/>'
+        _replace(
+            el,
+            _make_image(el, webp_name, width, height, "img" if alt else "presentation", alt),
+        )
 
-    return re.sub(
-        r"<a(?P<attrs>[^>]*)>(?P<body>.*?)</a>",
-        _rewrite,
-        svg_data,
-        flags=re.DOTALL,
-    )
-
-
-_COND_HREF_RE = re.compile(r'href="#cond=([^"]+):([01])"')
-
-
-_SVG_GA_TAG_RE = re.compile(r"<(/?)([ga])\b([^>]*)>")
+    return xmlutil.serialize_svg(root)
 
 
 def _mark_svg_cond_groups(svg_content: str) -> str:
-    g_stack: List[Tuple[int, int]] = []
-    edits: Dict[int, Tuple[int, str, str]] = {}
-
-    for m in _SVG_GA_TAG_RE.finditer(svg_content):
-        is_close = bool(m.group(1))
-        tag_name = m.group(2)
-        if tag_name == "g":
-            if is_close:
-                if g_stack:
-                    g_stack.pop()
-            else:
-                g_stack.append((m.start(), m.end()))
-        elif tag_name == "a" and not is_close:
-            cond_m = _COND_HREF_RE.search(m.group(3))
-            if cond_m and g_stack:
-                g_start, g_end = g_stack[-1]
-                if g_start not in edits:
-                    edits[g_start] = (g_end, cond_m.group(1), cond_m.group(2))
-
-    if not edits:
-        return svg_content
-
-    parts: List[str] = []
-    prev = 0
-    for g_start in sorted(edits):
-        g_end, cond_id, branch = edits[g_start]
-        parts.append(svg_content[prev:g_end - 1])
-        parts.append(
-            f' data-cond-id="{cond_id}" data-cond-branch="{branch}">'
-        )
-        prev = g_end
-    parts.append(svg_content[prev:])
-    return "".join(parts)
+    root = xmlutil.parse_svg(svg_content)
+    for el in list(xmlutil.iter_local(root, "a")):
+        href = (xmlutil.attr_local(el, "href") or "").strip()
+        cond = re.match(r"#cond=(.+):([01])$", href)
+        if not cond:
+            continue
+        ancestor = el.getparent()
+        while ancestor is not None and not (
+            isinstance(ancestor.tag, str) and xmlutil.local(ancestor.tag) == "g"
+        ):
+            ancestor = ancestor.getparent()
+        if ancestor is None or "data-cond-id" in ancestor.attrib:
+            continue
+        ancestor.set("data-cond-id", cond.group(1))
+        ancestor.set("data-cond-branch", cond.group(2))
+    return xmlutil.serialize_svg(root)
 
 
 def extract_friend_card_symbols(svg_path: str) -> int:
@@ -2518,86 +2319,59 @@ def extract_friend_card_symbols(svg_path: str) -> int:
     # reassigning hrefs without moving layout. Runs after compile_html (svgo already
     # done), so emitted ids/attributes are final.
     with open(svg_path, "r", encoding="utf-8") as f:
-        data = f.read()
+        root = xmlutil.parse_svg(f.read())
 
-    open_re = re.compile(
-        r'<g(?P<attrs>[^>]*\bclip-path="url\(#(?P<clip>[^"]+)\)"[^>]*)>'
-    )
-    tag_re = re.compile(r"<g\b[^>]*>|</g>")
-
-    cards: List[Dict[str, object]] = []
-    for m in open_re.finditer(data):
-        depth = 1
-        close_end: Optional[int] = None
-        for sm in tag_re.finditer(data, m.end()):
-            if sm.group().startswith("</g>"):
-                depth -= 1
-                if depth == 0:
-                    close_end = sm.end()
-                    break
-            else:
-                depth += 1
-        if close_end is None:
+    cards: List[Tuple[Any, str, str, str]] = []
+    for g in list(xmlutil.iter_local(root, "g")):
+        clip_path = g.get("clip-path")
+        transform = g.get("transform")
+        if clip_path is None or transform is None:
             continue
-        inner = data[m.end():close_end - len("</g>")]
-        tf = re.search(
-            r'\btransform="translate\(([-0-9.]+)\s+([-0-9.]+)\)"', m.group("attrs")
-        )
-        if not tf:
+        clip_m = re.fullmatch(r"url\(#(.+)\)", clip_path)
+        tf = re.fullmatch(r"translate\(([-0-9.]+)\s+([-0-9.]+)\)", transform)
+        if not clip_m or not tf:
             continue
-        cards.append(
-            {
-                "open_start": m.start(),
-                "close_end": close_end,
-                "inner": inner,
-                "clip": m.group("clip"),
-                "x": tf.group(1),
-                "y": tf.group(2),
-            }
-        )
+        cards.append((g, clip_m.group(1), tf.group(1), tf.group(2)))
 
     if not cards:
         return 0
 
-    symbols: List[str] = []
-    spans: List[Tuple[int, int, str]] = []
-    for i, card in enumerate(cards):
+    defs = None
+    for el in root.iter():
+        if isinstance(el.tag, str) and xmlutil.local(el.tag) == "defs":
+            defs = el
+
+    for i, (g, clip, x, y) in enumerate(cards):
         symbol_id = f"card-{i}"
-        symbols.append(
-            f'<symbol id="{symbol_id}"><g clip-path="url(#{card["clip"]})">'
-            f'{card["inner"]}</g></symbol>'
-        )
-        spans.append(
-            (
-                card["open_start"],
-                card["close_end"],
-                f'<use class="friend-card" href="#{symbol_id}"'
-                f' x="{card["x"]}" y="{card["y"]}"/>',
-            )
-        )
 
-    out = data
-    for open_start, close_end, use_tag in sorted(spans, key=lambda s: s[0], reverse=True):
-        out = out[:open_start] + use_tag + out[close_end:]
+        use_el = etree.Element(xmlutil.namespaced(g, "use"))
+        use_el.set("class", "friend-card")
+        use_el.set("href", f"#{symbol_id}")
+        use_el.set("x", x)
+        use_el.set("y", y)
+        use_el.tail = g.tail
 
-    defs_close = out.rfind("</defs>")
-    blob = "".join(symbols)
-    if defs_close == -1:
-        out = out.replace("</svg>", f"<defs>{blob}</defs></svg>", 1)
-    else:
-        out = out[:defs_close] + blob + out[defs_close:]
+        symbol_el = etree.Element(xmlutil.namespaced(g, "symbol"))
+        symbol_el.set("id", symbol_id)
+        inner_g = etree.SubElement(symbol_el, xmlutil.namespaced(g, "g"))
+        inner_g.set("clip-path", f"url(#{clip})")
+        inner_g.text = g.text
+        for child in list(g):
+            inner_g.append(child)
+
+        g.getparent().replace(g, use_el)
+        if defs is None:
+            defs = etree.SubElement(root, xmlutil.namespaced(root, "defs"))
+        defs.append(symbol_el)
 
     # Cards are hidden until friends.js reveals them post-shuffle, so the page
     # never flashes the default (file-order) cards on load.
-    svg_tag_end = out.find(">", out.find("<svg")) + 1
-    out = (
-        out[:svg_tag_end]
-        + "<style>use.friend-card{visibility:var(--friend-cards,hidden)}</style>"
-        + out[svg_tag_end:]
-    )
+    style_el = etree.Element(xmlutil.namespaced(root, "style"))
+    style_el.text = "use.friend-card{visibility:var(--friend-cards,hidden)}"
+    root.insert(0, style_el)
 
     with open(svg_path, "w", encoding="utf-8") as f:
-        f.write(out)
+        f.write(xmlutil.serialize_svg(root))
     return len(cards)
 
 
@@ -2616,55 +2390,48 @@ def patch_svg_file(
     with open(src_path, "r", encoding="utf-8") as svg_file:
         svg_data = svg_file.read()
 
-    svg_data = re.sub(
-        r'(<svg[^>]*?)\swidth="[^"]+"', r'\1 width="100%"', svg_data, count=1
-    )
-    svg_data = re.sub(
-        r'(<svg[^>]*?)\sheight="[^"]+"', r'\1 height="100%"', svg_data, count=1
-    )
+    root = xmlutil.parse_svg(svg_data)
+    if root.get("width") is not None:
+        root.set("width", "100%")
+    if root.get("height") is not None:
+        root.set("height", "100%")
+    safe_rewrites = svg_href_rewrites or {}
+    dest_dir = os.path.dirname(dst_path)
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for key in list(el.attrib):
+            if xmlutil.local(key) != "href":
+                continue
+            value = el.attrib[key]
+            rewritten = safe_rewrites.get(value, value)
+            if href_base_dir is not None:
+                rewritten = _rebase_relative_href_for_destination(
+                    href=rewritten,
+                    source_dir=href_base_dir,
+                    dest_dir=dest_dir,
+                )
+            el.attrib[key] = rewritten
+    svg_data = xmlutil.serialize_svg(root)
 
-    def _rewrite_href(match: re.Match) -> str:
-        attr = match.group("attr")
-        quote = match.group("quote")
-        value = match.group("value")
-        safe_rewrites = svg_href_rewrites or {}
-        rewritten = safe_rewrites.get(value, value)
-        if href_base_dir is not None:
-            rewritten = _rebase_relative_href_for_destination(
-                href=rewritten,
-                source_dir=href_base_dir,
-                dest_dir=os.path.dirname(dst_path),
-            )
-        return f"{attr}={quote}{rewritten}{quote}"
-
-    svg_data = re.sub(
-        r"(?P<attr>(?:xlink:)?href)\s*=\s*(?P<quote>['\"])(?P<value>[^'\"]+)(?P=quote)",
-        _rewrite_href,
-        svg_data,
-    )
     svg_data = _prepare_anchor_hrefs_for_svgo(svg_data)
 
-    def _rewrite_anchor_tag(match: re.Match) -> str:
-        attrs = match.group(1)
-        action_hash_match = re.search(
-            r"\s+(?:xlink:)?href\s*=\s*['\"]#(?:action|cond)=[^'\"]*['\"]",
-            attrs,
-        )
-        if action_hash_match:
-            attrs_without_target = re.sub(
-                r"\s+target\s*=\s*['\"][^'\"]*['\"]",
-                "",
-                attrs,
-            )
-            return f"<a{attrs_without_target}>"
+    # Per-anchor target policy: action/cond links drop target, external links
+    # open in a new tab, the rest target the top frame.
+    root = xmlutil.parse_svg(svg_data)
+    for el in list(xmlutil.iter_local(root, "a")):
+        href = _extract_anchor_href(el) or ""
+        if href.startswith(_ACTION_HREF_PREFIX) or href.startswith(_COND_HREF_PREFIX):
+            xmlutil.del_attr_local(el, "target")
+        elif "target" in el.attrib:
+            continue
+        elif is_external_href(href, site_base_url):
+            el.set("target", "_blank")
+            el.set("rel", "noopener noreferrer")
+        else:
+            el.set("target", "_top")
+    svg_data = xmlutil.serialize_svg(root)
 
-        if re.search(r"\s+target\s*=\s*['\"][^'\"]*['\"]", attrs):
-            return f"<a{attrs}>"
-        if is_external_href(_extract_anchor_href(attrs) or "", site_base_url):
-            return f"<a{EXTERNAL_LINK_ATTRS}{attrs}>"
-        return f'<a target="_top"{attrs}>'
-
-    svg_data = re.sub(r"<a([^>]*)>", _rewrite_anchor_tag, svg_data)
     svg_data = _inject_svg_anchor_accessibility(
         svg_data,
         svg_path=dst_path,
@@ -2717,11 +2484,11 @@ def _svg_aspect_ratio(svg_path: str) -> Optional[str]:
     """CSS aspect-ratio (e.g. "498.9 / 708.66") from an SVG's viewBox, so each
     page <object> reserves its true height before the SVG finishes loading."""
     with open(svg_path, "r", encoding="utf-8") as svg_file:
-        head = svg_file.read(8192)
-    match = re.search(r'<svg\b[^>]*?\bviewBox\s*=\s*["\']([^"\']+)["\']', head)
-    if not match:
+        root = xmlutil.parse_svg(svg_file.read())
+    view_box = root.get("viewBox")
+    if not view_box:
         return None
-    _, _, width, height = match.group(1).split()
+    _, _, width, height = view_box.split()
     return f"{width} / {height}"
 
 
