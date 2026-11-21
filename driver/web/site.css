@@ -32,6 +32,7 @@ html {
     --svg-muted-stroke: #646464;
     --svg-code-gutter: #787878;
     --svg-focus-ring: #3f63cc;
+    --selection-bg: rgba(59, 120, 231, 0.26);
 }
 
 :root[data-theme="dark"] {
@@ -63,6 +64,7 @@ html {
     --svg-muted-stroke: #a7b0bf;
     --svg-code-gutter: #6f7783;
     --svg-focus-ring: #8ca8ff;
+    --selection-bg: rgba(120, 162, 255, 0.32);
 }
 
 .sr-only {
@@ -338,4 +340,82 @@ html[data-layout="mobile"] .pages-desktop {
 
 .svg-input-overlay:focus {
     box-shadow: 0 0 0 2px var(--svg-focus-ring);
+}
+
+.page-wrap {
+    position: relative;
+    width: 100%;
+    container-type: inline-size;
+}
+
+.page-overlay {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+    --u: calc(100cqi / var(--page-w));
+    line-height: 1.15;
+    text-size-adjust: none;
+    -webkit-text-size-adjust: none;
+    z-index: 2;
+}
+
+.ov-cond {
+    display: contents;
+}
+
+.ov-cond[data-cond-branch="1"] {
+    display: var(--svg-cond-b1, none);
+}
+
+.ov-card {
+    display: contents;
+    visibility: var(--friend-cards, hidden);
+}
+
+.ov-hit {
+    position: absolute;
+    z-index: 1;
+}
+
+.ov-s {
+    position: absolute;
+    z-index: 2;
+    white-space: pre;
+    color: transparent;
+    cursor: text;
+    transform-origin: 0 0;
+    font-family: Georgia, "Times New Roman", "Songti SC", serif;
+    font-size: calc(var(--fs) * var(--u));
+    line-height: 1.15;
+    text-decoration: none;
+}
+
+.ov-m {
+    font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace;
+}
+
+.ov-b {
+    font-weight: 700;
+}
+
+.ov-i {
+    font-style: italic;
+}
+
+.page-overlay a,
+.page-overlay [data-action] {
+    cursor: pointer;
+    -webkit-user-drag: none;
+}
+
+.page-overlay [data-action^="input:"] {
+    cursor: text;
+}
+
+.ov-s::selection {
+    background: var(--selection-bg);
+    color: transparent;
 }

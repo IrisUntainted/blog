@@ -149,7 +149,7 @@
     if (!spec || (spec.validate && !spec.validate(token.arg))) {
       return null;
     }
-    return {spec, arg: token.arg};
+    return {key: token.key, spec, arg: token.arg};
   };
 
   const bindSvgActionsToObject = (pageObject) => {
@@ -327,5 +327,149 @@
     if (!getSavedTheme()) {
       applyTheme(event.matches ? DARK_THEME : LIGHT_THEME, false);
     }
+  });
+
+  const SERIF_FONT = 'Georgia, "Times New Roman", "Songti SC", serif';
+  const MONO_FONT = '"DejaVu Sans Mono", Menlo, Consolas, monospace';
+  const COPY_SEPS = {s: ' ', t: '\t', n: '\n', nn: '\n\n'};
+
+  const calibrateOverlays = () => {
+    const spans = document.querySelectorAll('.page-overlay .ov-s');
+    if (!spans.length) return;
+    const measureCtx = document.createElement('canvas').getContext('2d');
+    if (!measureCtx) return;
+
+    let lastFont = '';
+    for (const el of spans) {
+      const text = el.textContent || '';
+      const w = parseFloat(el.style.getPropertyValue('--w'));
+      const fs = parseFloat(el.style.getPropertyValue('--fs'));
+      if (!text || !(w > 0) || !(fs > 0)) continue;
+
+      const style = el.classList.contains('ov-i') ? 'italic' : 'normal';
+      const weight = el.classList.contains('ov-b') ? '700' : '400';
+      const family = el.classList.contains('ov-m') ? MONO_FONT : SERIF_FONT;
+      const fontSpec = `${style} ${weight} 100px ${family}`;
+      if (fontSpec !== lastFont) {
+        measureCtx.font = fontSpec;
+        lastFont = fontSpec;
+      }
+      const naturalPt = (measureCtx.measureText(text).width / 100) * fs;
+      if (naturalPt > 0) {
+        const scale = Math.min(2.5, Math.max(0.5, w / naturalPt));
+        el.style.transform = `scaleX(${scale.toFixed(4)})`;
+      }
+    }
+  };
+
+  calibrateOverlays();
+  if (document.fonts?.size) {
+    document.fonts.ready.then(calibrateOverlays);
+  }
+
+  const findSvgActionAnchor = (pageObject, key, arg, x, y) => {
+    const svgDoc = pageObject?.contentDocument;
+    if (!svgDoc) return null;
+    const objRect = pageObject.getBoundingClientRect();
+    let bestAnchor = null;
+    let bestDist = Infinity;
+    for (const a of svgDoc.querySelectorAll('a[href^="#action="]')) {
+      const tok = parseActionToken(readAnchorHref(a));
+      if (!tok || tok.key !== key || tok.arg !== arg) continue;
+      const r = a.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const dist = Math.hypot(
+          objRect.left + r.left + r.width * 0.5 - x,
+          objRect.top + r.top + r.height * 0.5 - y,
+      );
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestAnchor = a;
+      }
+    }
+    return bestAnchor;
+  };
+
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!target || typeof target.closest !== 'function') return;
+    const overlay = target.closest('.page-overlay');
+    if (!overlay) return;
+
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().length > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const actionEl = target.closest('[data-action]');
+    if (!actionEl) return;
+    const action = parseSvgAction(
+        ACTION_PREFIX + (actionEl.getAttribute('data-action') || ''));
+    if (!action) return;
+
+    event.preventDefault();
+    const pageObject = overlay.closest('.page-wrap')?.querySelector('object.page');
+    const anchorNode = findSvgActionAnchor(
+        pageObject, action.key, action.arg, event.clientX, event.clientY);
+    action.spec.press(action.arg, {anchorNode, pageObject});
+  });
+
+  document.addEventListener('copy', (event) => {
+    if (document.activeElement?.matches?.('input, textarea')) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+
+    const visibleSpans = [...document.querySelectorAll('.page-overlay .ov-s')]
+        .filter((el) => el.getClientRects().length > 0);
+    if (!visibleSpans.length) return;
+
+    const rangeTexts = [];
+    for (let ri = 0; ri < sel.rangeCount; ri++) {
+      const range = sel.getRangeAt(ri);
+      if (range.collapsed) continue;
+
+      const selected = visibleSpans.filter((el) => range.intersectsNode(el));
+      if (!selected.length) continue;
+
+      const pieces = [];
+      for (const el of selected) {
+        const full = el.textContent || '';
+        const textNode =
+            el.firstChild?.nodeType === Node.TEXT_NODE ? el.firstChild : null;
+        let start = 0;
+        let end = full.length;
+        if (textNode && range.startContainer === textNode) {
+          start = range.startOffset;
+        } else if (range.startContainer === el && range.startOffset > 0) {
+          start = full.length;
+        }
+        if (textNode && range.endContainer === textNode) {
+          end = range.endOffset;
+        } else if (range.endContainer === el && range.endOffset === 0) {
+          end = 0;
+        }
+        const slice = full.slice(start, end);
+        if (slice.length > 0) {
+          pieces.push({el, slice, atEnd: end === full.length});
+        }
+      }
+
+      let text = '';
+      for (let i = 0; i < pieces.length; i++) {
+        text += pieces[i].slice;
+        if (i < pieces.length - 1 && pieces[i].atEnd) {
+          text += COPY_SEPS[pieces[i].el.dataset.sep] || '';
+        }
+      }
+      if (text) rangeTexts.push(text);
+    }
+
+    if (!rangeTexts.length) return;
+    const out = rangeTexts.join('\n').replace(/[ \t]+\n/g, '\n');
+    if (!out) return;
+    event.clipboardData?.setData('text/plain', out);
+    event.preventDefault();
   });
 })();

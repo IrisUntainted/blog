@@ -65,13 +65,12 @@ def pdf_creation_timestamp(inputs: Optional[Dict[str, str]]) -> Optional[str]:
     return str(int(parsed_date.replace(tzinfo=timezone.utc).timestamp()))
 
 
-def compile_typst(
-    source_bytes: bytes,
+def _build_compile_command(
     output_path: str,
     export_format: str,
     inputs: Optional[Dict[str, str]] = None,
     creation_timestamp: Optional[str] = None,
-) -> None:
+) -> List[str]:
     command = [
         _resolve_typst_path(),
         "compile",
@@ -85,6 +84,22 @@ def compile_typst(
             command.extend(["--input", f"{key}={value}"])
     if creation_timestamp:
         command.extend(["--creation-timestamp", creation_timestamp])
+    return command
+
+
+def compile_typst(
+    source_bytes: bytes,
+    output_path: str,
+    export_format: str,
+    inputs: Optional[Dict[str, str]] = None,
+    creation_timestamp: Optional[str] = None,
+) -> None:
+    command = _build_compile_command(
+        output_path,
+        export_format,
+        inputs=inputs,
+        creation_timestamp=creation_timestamp,
+    )
 
     try:
         subprocess.run(command, check=True, input=source_bytes)
@@ -98,6 +113,25 @@ def compile_typst(
         elif e.output:
             print(e.output.decode("utf-8"), file=sys.stderr)
         raise RuntimeError(f"Typst compilation failed. Exit code {e.returncode}") from e
+
+
+def compile_typst_bytes(
+    source_bytes: bytes,
+    export_format: str,
+    inputs: Optional[Dict[str, str]] = None,
+) -> bytes:
+    command = _build_compile_command("-", export_format, inputs=inputs)
+    try:
+        result = subprocess.run(
+            command, check=True, input=source_bytes, capture_output=True
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode("utf-8").strip() if e.stderr else ""
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"Typst compilation to bytes failed (exit code {e.returncode}){detail}"
+        ) from e
+    return result.stdout
 
 
 def query_typst(

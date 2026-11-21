@@ -11,6 +11,7 @@ from .glyphs import (
     extract_first_glyph_symbol_id,
     find_glyph_asset,
 )
+from .overlay import PageOverlay, build_svg_overlays, fmt_num
 from .paths import WEB_ASSETS_DIR_NAME, asset_rel_path, relative_href, root_asset_href
 from .svg import (
     is_generated_svg,
@@ -22,6 +23,7 @@ from .svg import (
 from .typst import (
     TypstInputs,
     compile_typst,
+    compile_typst_bytes,
     pdf_creation_timestamp,
     query_page_metadata,
 )
@@ -120,8 +122,10 @@ def _process_svg_set(
     action_metadata: Optional[Dict[str, Dict[str, str]]],
     shared_glyphs: bool,
     asset_context: AssetContext,
+    pdf_bytes: bytes,
     page_count_limit: Optional[int] = None,
     custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
+    friend_cards: bool = False,
 ) -> Tuple[List[str], Optional[str], Dict[str, str]]:
     svg_files = sorted(
         f for f in os.listdir(source_dir) if is_generated_svg(f, svg_name_prefix)
@@ -161,6 +165,14 @@ def _process_svg_set(
         patched_svg_paths.append(dst_path)
         page_titles.append(title_format.replace("{i}", str(i)))
 
+    overlays: List[PageOverlay] = build_svg_overlays(
+        pdf_bytes,
+        patched_svg_paths,
+        svg_href_rewrites=svg_href_rewrites,
+        site_base_url=site_base_url,
+        friend_cards=friend_cards,
+    )
+
     glyph_asset_path: Optional[str] = None
     if shared_glyphs:
         glyph_asset_path, _ = extract_and_rewrite_glyphs(
@@ -176,15 +188,25 @@ def _process_svg_set(
             )
 
     page_links: List[str] = []
-    for svg_path, page_title in zip(patched_svg_paths, page_titles):
+    for idx, (svg_path, page_title) in enumerate(zip(patched_svg_paths, page_titles)):
         page_href = f"./{WEB_ASSETS_DIR_NAME}/{asset_rel_path(svg_path)}"
         aspect_ratio = svg_aspect_ratio(svg_path)
         style_attr = f' style="aspect-ratio: {aspect_ratio}"' if aspect_ratio else ""
-        page_links.append(
+        obj_html = (
             f'<object class="page" type="image/svg+xml" '
             f'data-src="{html.escape(page_href, quote=True)}"{style_attr} '
             f'title="{page_title}"></object>'
         )
+        if idx < len(overlays) and overlays[idx].width > 0:
+            ov = overlays[idx]
+            page_links.append(
+                f'<div class="page-wrap" style="--page-w:{fmt_num(ov.width)}">\n'
+                f"{obj_html}\n"
+                f'<div class="page-overlay" aria-hidden="true">{ov.html}</div>\n'
+                f"</div>"
+            )
+        else:
+            page_links.append(obj_html)
 
     return page_links, glyph_asset_path, image_asset_names
 
@@ -193,10 +215,12 @@ def _build_html_from_svgs(
     config: HtmlBuildConfig,
     output_dir: str,
     page_count: int,
+    pdf_bytes: bytes,
     asset_hash: Optional[str] = None,
     action_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     custom_theme_colors: Optional[List[Tuple[str, str]]] = None,
     required_assets: Optional[Set[str]] = None,
+    friend_cards: bool = False,
 ) -> CompiledPage:
     with open(config.template_path, "r", encoding="utf-8") as f:
         template = f.read()
@@ -222,6 +246,8 @@ def _build_html_from_svgs(
         asset_context=config.asset_context,
         page_count_limit=page_count or None,
         custom_theme_colors=custom_theme_colors,
+        pdf_bytes=pdf_bytes,
+        friend_cards=friend_cards,
     )
 
     if config.image_source_dir is not None and asset_hash is not None:
@@ -383,7 +409,15 @@ def compile_html(request: CompileBuildRequest) -> CompiledPage:
             hidden_text=resolved_hidden,
         )
 
+    desktop_overlay_pdf = compile_typst_bytes(
+        request.source_bytes, export_format="pdf", inputs=svg_in
+    )
+    friend_cards = "friends" in meta.required_assets
+
     if request.mobile is not None:
+        mobile_overlay_pdf = compile_typst_bytes(
+            request.source_bytes, export_format="pdf", inputs=m_inputs
+        )
         html_dir = os.path.dirname(
             os.path.join(html_config.dest_dir, html_config.html_filename)
         )
@@ -403,6 +437,8 @@ def compile_html(request: CompileBuildRequest) -> CompiledPage:
             shared_glyphs=html_config.shared_glyphs,
             asset_context=html_config.asset_context,
             custom_theme_colors=meta.theme_colors or None,
+            pdf_bytes=mobile_overlay_pdf,
+            friend_cards=friend_cards,
         )
         mobile_html = (
             f'<div class="{request.mobile.wrapper_class}">\n'
@@ -423,4 +459,6 @@ def compile_html(request: CompileBuildRequest) -> CompiledPage:
         action_metadata=meta.actions,
         custom_theme_colors=meta.theme_colors or None,
         required_assets=meta.required_assets,
+        pdf_bytes=desktop_overlay_pdf,
+        friend_cards=friend_cards,
     )

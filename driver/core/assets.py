@@ -65,7 +65,8 @@ _ASSET_CTX_LOCK = threading.Lock()
 _ASSET_CTX_CACHE: Dict[str, AssetContext] = {}
 
 _HTML_MINIFY_PRESERVE_RE = re.compile(
-    r"(<(?:script|style|pre)\b[^>]*>.*?</(?:script|style|pre)>)",
+    r"(<(?:script\b[^>]*>.*?</script>|style\b[^>]*>.*?</style>|pre\b[^>]*>.*?</pre>"
+    r"|span\b[^>]*\bov-s\b[^>]*>.*?</span>|a\b[^>]*\bov-s\b[^>]*>.*?</a>))",
     re.DOTALL | re.IGNORECASE,
 )
 

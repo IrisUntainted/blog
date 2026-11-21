@@ -216,6 +216,7 @@
 
   const spawnInputOverlay = (
       id, anchorNode, pageObject, initialKey, shouldFocus = true) => {
+    if (!anchorNode || !pageObject) return;
     const existing = ACTIVE_INPUTS.get(id);
     if (existing) {
       if (shouldFocus) {
@@ -411,6 +412,8 @@
     });
   });
 
+  document.documentElement.style.setProperty('--svg-cond-b1', 'contents');
+
   document.querySelectorAll('object.page[type="image/svg+xml"]')
       .forEach((pageObject) => {
         pageObject.addEventListener('load', () => bindPageObject(pageObject));
@@ -446,7 +449,7 @@
   });
   registerSvgAction('form-action', {
     press: (id, ctx) => {
-      if (ctx) {
+      if (ctx && ctx.anchorNode) {
         const g = ctx.anchorNode.parentElement;
         g.style.opacity = '0.5';
         setTimeout(() => { g.style.opacity = ''; }, 150);

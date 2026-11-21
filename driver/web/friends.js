@@ -33,6 +33,28 @@
     svgDoc.documentElement.style.setProperty("--friend-cards", "visible");
   };
 
+  const applyToOverlay = (pageObject) => {
+    const overlay = pageObject.closest(".page-wrap")?.querySelector(".page-overlay");
+    if (!overlay) return;
+    const cards = Array.from(overlay.querySelectorAll(".ov-card"))
+      .sort((a, b) => Number(a.dataset.cardIdx) - Number(b.dataset.cardIdx));
+    if (cards.length === n) {
+      const slotYs = cards.map((c) => parseFloat(c.dataset.cardY || "0"));
+      perm.forEach((origIdx, slotIdx) => {
+        const card = cards[origIdx];
+        const dy = slotYs[slotIdx] - slotYs[origIdx];
+        card.querySelectorAll(".ov-s, .ov-hit").forEach((el) => {
+          const baseTop = parseFloat(
+            el.dataset.baseTop || (el.dataset.baseTop = String(parseFloat(el.style.top || "0")))
+          );
+          el.style.top = (baseTop + dy).toFixed(3) + "%";
+        });
+        overlay.appendChild(card);
+      });
+    }
+    overlay.style.setProperty("--friend-cards", "visible");
+  };
+
   const bound = new WeakSet();
   const init = (pageObject, force = false) => {
     const svgDoc = pageObject.contentDocument;
@@ -49,6 +71,7 @@
     }
     bound.add(svgDoc);
     applyToSvg(svgDoc);
+    applyToOverlay(pageObject);
     return true;
   };
 
