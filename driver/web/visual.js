@@ -30,17 +30,27 @@
     '--svg-focus-ring',
   ];
 
-  const resolveTheme = (theme) =>
-      (theme === DARK_THEME ? DARK_THEME : LIGHT_THEME);
-
-  const getSavedTheme = () => {
+  const readStorage = (key, validValues) => {
     try {
-      const theme = window.localStorage?.getItem(STORAGE_KEY);
-      return theme === LIGHT_THEME || theme === DARK_THEME ? theme : null;
+      const value = window.localStorage?.getItem(key);
+      return validValues.includes(value) ? value : null;
     } catch {
       return null;
     }
   };
+
+  const writeStorage = (key, value) => {
+    try {
+      window.localStorage?.setItem(key, value);
+    } catch {
+      // noop
+    }
+  };
+
+  const resolveTheme = (theme) =>
+      (theme === DARK_THEME ? DARK_THEME : LIGHT_THEME);
+
+  const getSavedTheme = () => readStorage(STORAGE_KEY, [LIGHT_THEME, DARK_THEME]);
 
   const getPreferredTheme = () => {
     const media = window.matchMedia?.('(prefers-color-scheme: dark)');
@@ -119,13 +129,10 @@
     } catch {
       // Keep the raw payload when decoding fails.
     }
-    const segments = payload.split('|')
-        .map((segment) => segment.trim())
-        .filter((segment) => segment.length > 0);
-    if (segments.length === 0) {
+    const token = payload.trim();
+    if (!token) {
       return null;
     }
-    const token = segments[0];
     const colonIdx = token.indexOf(':');
     return colonIdx < 0
         ? {key: token, arg: ''}
@@ -227,11 +234,7 @@
             (pageObject) => applyThemeToObject(pageObject, computedStyles));
 
     if (persist) {
-      try {
-        window.localStorage?.setItem(STORAGE_KEY, resolvedTheme);
-      } catch {
-        // noop
-      }
+      writeStorage(STORAGE_KEY, resolvedTheme);
     }
   };
 
@@ -291,11 +294,7 @@
     document.documentElement.setAttribute('data-layout', resolvedLayout);
     activateLayoutPages(resolvedLayout);
     if (persist) {
-      try {
-        window.localStorage?.setItem(LAYOUT_STORAGE_KEY, resolvedLayout);
-      } catch {
-        // noop
-      }
+      writeStorage(LAYOUT_STORAGE_KEY, resolvedLayout);
     }
   };
 

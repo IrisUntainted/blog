@@ -1,0 +1,880 @@
+import hashlib
+import html
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from . import xmlutil
+from .paths import ASSET_HASH_LEN, EXTERNAL_LINK_ATTRS, is_external_href, raw_copy_id
+from .typst import extract_table_rows, plain_text
+
+_SENTENCE_RE = re.compile(r".+?(?:[.!?](?=\s|$)|$)")
+
+_UNICODE_TO_TYPST: Dict[str, str] = {
+    "\u222b": "integral",
+    "\u221e": "infinity",
+    "\u2211": "sum",
+    "\u220f": "product",
+    "\u2192": "->",
+    "\u2190": "<-",
+    "\u21d2": "=>",
+    "\u21d0": "<=",
+    "\u2264": "<=",
+    "\u2265": ">=",
+    "\u2260": "!=",
+    "\u2248": "approx",
+    "\u00b1": "plus.minus",
+    "\u2213": "minus.plus",
+    "\u00d7": "times",
+    "\u00f7": "div",
+    "\u2218": "compose",
+    "\u2229": "sect",
+    "\u222a": "union",
+    "\u2286": "subset.eq",
+    "\u2287": "supset.eq",
+    "\u2282": "subset",
+    "\u2283": "supset",
+    "\u2208": "in",
+    "\u2209": "not in",
+    "\u2200": "forall",
+    "\u2203": "exists",
+    "\u2205": "emptyset",
+    "\u2026": "...",
+    "\u22ef": "dots.c",
+    "\u22ee": "dots.v",
+    "\u22f0": "dots.up",
+    "\u22f1": "dots.down",
+    "\u2207": "nabla",
+    "\u2202": "diff",
+    "\u03b1": "alpha",
+    "\u03b2": "beta",
+    "\u03b3": "gamma",
+    "\u03b4": "delta",
+    "\u03b5": "epsilon",
+    "\u03b6": "zeta",
+    "\u03b7": "eta",
+    "\u03b8": "theta",
+    "\u03b9": "iota",
+    "\u03ba": "kappa",
+    "\u03bb": "lambda",
+    "\u03bc": "mu",
+    "\u03bd": "nu",
+    "\u03be": "xi",
+    "\u03c0": "pi",
+    "\u03c1": "rho",
+    "\u03c3": "sigma",
+    "\u03c4": "tau",
+    "\u03c5": "upsilon",
+    "\u03c6": "phi",
+    "\u03c7": "chi",
+    "\u03c8": "psi",
+    "\u03c9": "omega",
+    "\u0393": "Gamma",
+    "\u0394": "Delta",
+    "\u0398": "Theta",
+    "\u039b": "Lambda",
+    "\u039e": "Xi",
+    "\u03a0": "Pi",
+    "\u03a3": "Sigma",
+    "\u03a6": "Phi",
+    "\u03a8": "Psi",
+    "\u03a9": "Omega",
+    "\u2102": "CC",
+    "\u2115": "NN",
+    "\u211a": "QQ",
+    "\u211d": "RR",
+    "\u2124": "ZZ",
+}
+
+
+def page_head_title(
+    page_title: str,
+    site_title: str,
+    page_subtitle: Optional[str] = None,
+) -> str:
+    parts = [page_title]
+    if page_subtitle:
+        parts.append(page_subtitle)
+    if page_title != site_title:
+        parts.append(site_title)
+    return " - ".join(parts)
+
+
+def _normalize_desc_text(text: str) -> str:
+    normalized = html.unescape(text).translate(
+        str.maketrans(
+            {
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u2026": "...",
+            }
+        )
+    )
+    return " ".join(normalized.split())
+
+
+def first_desc(
+    html_fragment: str,
+    fallback_desc: str,
+    skip_texts: Optional[List[str]] = None,
+    max_length: int = 220,
+) -> str:
+    skip_set = {
+        _normalize_desc_text(text) for text in (skip_texts or []) if text and text.strip()
+    }
+    block_tags = ("blockquote", "p", "pre", "figcaption", "li")
+    doc = xmlutil.parse_html(html_fragment)
+    for el in doc.iter():
+        if not (isinstance(el.tag, str) and el.tag in block_tags):
+            continue
+        # itertext() on the outer block already emits nested text.
+        ancestor = el.getparent()
+        while ancestor is not None and not (
+            isinstance(ancestor.tag, str) and ancestor.tag in block_tags
+        ):
+            ancestor = ancestor.getparent()
+        if ancestor is not None:
+            continue
+
+        if el.tag == "p" and re.search(
+            r"\b(?:subtitle|post-nav)\b", el.get("class") or ""
+        ):
+            continue
+
+        block_text = " ".join(" ".join(el.itertext()).split())
+        if (
+            not block_text
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", block_text)
+            or _normalize_desc_text(block_text) in skip_set
+        ):
+            continue
+
+        match = _SENTENCE_RE.search(block_text)
+        if not match:
+            continue
+        first_sentence = match.group(0).strip()
+        if not first_sentence:
+            continue
+        if len(first_sentence) <= max_length:
+            return first_sentence
+        return first_sentence[: max_length - 1].rstrip() + "…"
+
+    return fallback_desc
+
+
+def _embed_links_in_text(
+    text: str,
+    links: List[Tuple[str, str]],
+    site_base_url: Optional[str] = None,
+) -> str:
+    for href, label in links:
+        escaped_label = html.escape(label)
+        idx = text.find(escaped_label)
+        if idx == -1:
+            continue
+        before = text[:idx]
+        if before.count("<a ") + before.count("<a>") > before.count("</a>"):
+            continue
+        safe_href = html.escape(href, quote=True)
+        target_attrs = (
+            EXTERNAL_LINK_ATTRS if is_external_href(href, site_base_url) else ""
+        )
+        anchor = f'<a href="{safe_href}"{target_attrs} tabindex="-1">{escaped_label}</a>'
+        text = before + anchor + text[idx + len(escaped_label) :]
+    return text
+
+
+def _raw_id_attr(copy_id: str, seen_raw_ids: Optional[Set[str]]) -> str:
+    if seen_raw_ids is not None:
+        if copy_id in seen_raw_ids:
+            return ""
+        seen_raw_ids.add(copy_id)
+    return f' id="raw-{copy_id}"'
+
+
+def _render_table_html(
+    table_rows: List[List[Dict[str, Any]]],
+    seen_raw_ids: Optional[Set[str]] = None,
+) -> str:
+    if not table_rows:
+        return ""
+
+    header_row = table_rows[0]
+    has_header = (
+        len(table_rows) > 1
+        and bool(header_row)
+        and all(int(cell["rowspan"]) == 1 for cell in header_row)
+    )
+
+    def build_row_html(
+        row_cells: List[Dict[str, Any]], cell_tag: str, scope_attr: str = ""
+    ) -> str:
+        row_parts: List[str] = ["<tr>"]
+        for cell in row_cells:
+            raw_text = plain_text(cell["text"])
+            escaped_text = html.escape(raw_text)
+            if bool(cell["is_inline_code"]):
+                id_attr = _raw_id_attr(raw_copy_id(raw_text), seen_raw_ids)
+                content_html = f"<code{id_attr}>{escaped_text}</code>"
+            else:
+                content_html = escaped_text
+            attrs: List[str] = []
+            colspan = int(cell["colspan"])
+            rowspan = int(cell["rowspan"])
+            if colspan > 1:
+                attrs.append(f'colspan="{colspan}"')
+            if rowspan > 1:
+                attrs.append(f'rowspan="{rowspan}"')
+            if scope_attr:
+                attrs.append(scope_attr)
+            attrs_html = f" {' '.join(attrs)}" if attrs else ""
+            row_parts.append(f"<{cell_tag}{attrs_html}>{content_html}</{cell_tag}>")
+        row_parts.append("</tr>")
+        return "".join(row_parts)
+
+    parts: List[str] = ["<table>"]
+    if has_header:
+        parts.extend(["<thead>", build_row_html(header_row, "th", 'scope="col"'), "</thead>"])
+        body_rows = table_rows[1:]
+    else:
+        body_rows = table_rows
+
+    parts.append("<tbody>")
+    for row in body_rows:
+        parts.append(build_row_html(row, "td"))
+    parts.extend(["</tbody>", "</table>"])
+    return "".join(parts)
+
+
+def _format_numbering(n: int, fmt: str) -> str:
+    if fmt == "a" and 1 <= n <= 26:
+        return chr(ord("a") + n - 1)
+    if fmt == "A" and 1 <= n <= 26:
+        return chr(ord("A") + n - 1)
+    return str(n)
+
+
+def _serialize_math(node: Any) -> str:
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(_serialize_math(item) for item in node)
+    if not isinstance(node, dict):
+        return ""
+
+    func = node.get("func")
+    if func == "text":
+        return node.get("text", "")
+    if func == "symbol":
+        sym = node.get("text", "")
+        return _UNICODE_TO_TYPST.get(sym, sym)
+    if func in ("space", "linebreak", "h"):
+        return " "
+    if func == "sequence":
+        return "".join(_serialize_math(c) for c in node.get("children", []))
+    if func == "attach":
+        result = _serialize_math(node.get("base", ""))
+        for key, op in (("b", "_"), ("t", "^")):
+            val = node.get(key)
+            if val is not None:
+                s = _serialize_math(val)
+                result += f"{op}{s}" if len(s) == 1 else f"{op}({s})"
+        return result
+    if func == "frac":
+        return f"({_serialize_math(node.get('num', ''))}) / ({_serialize_math(node.get('denom', ''))})"
+    if func == "root":
+        radicand = _serialize_math(node.get("radicand", ""))
+        index = node.get("index")
+        return (
+            f"root({_serialize_math(index)}, {radicand})"
+            if index is not None
+            else f"sqrt({radicand})"
+        )
+    if func == "binom":
+        return f"binom({_serialize_math(node.get('upper', ''))}, {_serialize_math(node.get('lower', ''))})"
+    if func == "lr":
+        return _serialize_math(node.get("body", ""))
+    if func == "op":
+        return _serialize_math(node.get("text", ""))
+    if func == "styled":
+        return _serialize_math(node.get("child", ""))
+    if func == "accent":
+        base = _serialize_math(node.get("base", ""))
+        accent_char = node.get("accent", {})
+        if isinstance(accent_char, dict):
+            accent_char = accent_char.get("text", "")
+        return f"{base}\u0302" if accent_char == "\u0302" else f"accent({base})"
+    if func in ("vec", "mat"):
+        items = ", ".join(_serialize_math(c) for c in node.get("children", []))
+        return f"{func}({items})"
+
+    parts: List[str] = []
+    text_val = node.get("text")
+    if isinstance(text_val, str):
+        parts.append(text_val)
+    for key in ("body", "children", "child", "value", "num", "denom"):
+        if key in node:
+            parts.append(_serialize_math(node[key]))
+    return "".join(parts)
+
+
+def _collect_emphasis_text(emphasis_elems: List[Dict[str, Any]]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for elem in emphasis_elems:
+        t = elem.get("t")
+        tag = "strong" if t == "b" else "em" if t == "i" else None
+        if not tag:
+            continue
+        text = plain_text(elem.get("b", ""))
+        if text:
+            result[text] = tag
+    return result
+
+
+def _format_eq_text(node: Dict[str, Any]) -> str:
+    alt = node.get("alt")
+    if isinstance(alt, str) and alt.strip():
+        return html.escape(alt.strip())
+    return html.escape(" ".join(_serialize_math(node.get("b", "")).split()))
+
+
+def _extract_alt(alt_raw: Any) -> str:
+    if isinstance(alt_raw, str):
+        return alt_raw.strip()
+    if alt_raw is not None:
+        return plain_text(alt_raw)
+    return ""
+
+
+def _render_form_control(href: str, body_node: Any) -> Tuple[Optional[str], bool]:
+    if href.startswith("#action=input:"):
+        input_id = html.escape(href[len("#action=input:") :], quote=True)
+        placeholder = html.escape(plain_text(body_node), quote=True)
+        return (
+            f' <input class="sr-only-input"'
+            f' data-input-id="{input_id}"'
+            f' aria-label="{placeholder}" tabindex="-1">',
+            False,
+        )
+    if href.startswith("#action=form-action:"):
+        action_id = html.escape(href[len("#action=form-action:") :], quote=True)
+        label = html.escape(plain_text(body_node))
+        return (
+            f' <button class="sr-only-action"'
+            f' data-action-id="{action_id}" tabindex="-1">{label}</button>',
+            False,
+        )
+    if href.startswith("#action=checkbox:"):
+        cb_id = href[len("#action=checkbox:") :]
+        cb_label = plain_text(body_node, skip_cond_links=True)
+        esc_id = html.escape(cb_id, quote=True)
+        esc_label = html.escape(cb_label or cb_id, quote=True)
+        suffix = f" {html.escape(cb_label)}" if cb_label else ""
+        return (
+            f'<input type="checkbox" class="sr-only-checkbox"'
+            f' data-checkbox-id="{esc_id}"'
+            f' aria-label="{esc_label}" tabindex="-1">{suffix}',
+            True,
+        )
+    if href.startswith("#action=radio:"):
+        rest = href[len("#action=radio:") :]
+        colon_idx = rest.find(":")
+        if colon_idx <= 0:
+            return None, False
+        r_group, r_value = rest[:colon_idx], rest[colon_idx + 1 :]
+        r_label = plain_text(body_node, skip_cond_links=True)
+        esc_group = html.escape(r_group, quote=True)
+        esc_value = html.escape(r_value, quote=True)
+        esc_label = html.escape(r_label or f"{r_group}: {r_value}", quote=True)
+        suffix = f" {html.escape(r_label)}" if r_label else ""
+        return (
+            f'<input type="radio" class="sr-only-radio"'
+            f' name="{esc_group}" value="{esc_value}"'
+            f' data-radio-group="{esc_group}"'
+            f' aria-label="{esc_label}" tabindex="-1">{suffix}',
+            True,
+        )
+    return None, False
+
+
+def flatten_doc_node_to_html(
+    node: Any,
+    emphasis_map: Optional[Dict[str, str]] = None,
+    site_base_url: Optional[str] = None,
+    seen_raw_ids: Optional[Set[str]] = None,
+    inline_math: Optional[List[Tuple[int, str]]] = None,
+    used_inline_math: Optional[List[int]] = None,
+) -> str:
+    if isinstance(node, str):
+        return html.escape(node)
+    if isinstance(node, list):
+        return "".join(
+            flatten_doc_node_to_html(
+                item, emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+            )
+            for item in node
+        )
+    if not isinstance(node, dict):
+        return ""
+
+    func = node.get("func")
+    if func == "space":
+        return " "
+    if func == "linebreak":
+        return "<br>"
+    if func == "smartquote":
+        return html.escape('"' if node.get("double") else "'")
+    if func == "inline" and inline_math:
+        eq_idx, frag = inline_math.pop(0)
+        if used_inline_math is not None:
+            used_inline_math.append(eq_idx)
+        return frag
+    if func in ("emph", "strong"):
+        tag = "em" if func == "emph" else "strong"
+        inner = flatten_doc_node_to_html(
+            node.get("body", ""), emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+        )
+        return f"<{tag}>{inner}</{tag}>"
+    if func == "styled" and emphasis_map:
+        inner = flatten_doc_node_to_html(
+            node.get("child", ""), emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+        )
+        tag = emphasis_map.get(plain_text(node.get("child", "")))
+        return f"<{tag}>{inner}</{tag}>" if tag else inner
+    if func == "link":
+        dest = node.get("dest", "")
+        if isinstance(dest, str) and dest.startswith("#action=") and not dest.startswith("#action=copy:"):
+            return ""
+        body_html = flatten_doc_node_to_html(
+            node.get("body", ""), emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+        )
+        if isinstance(dest, str) and dest.startswith("#cond="):
+            m = re.match(r"#cond=(.+):([01])$", dest)
+            if m:
+                cond_id, branch = m.group(1), m.group(2)
+                if cond_id.startswith("ui:"):
+                    return ""
+                hide = ' style="display:none"' if branch == "1" else ""
+                return (
+                    f'<span data-cond-id="{html.escape(cond_id, quote=True)}"'
+                    f' data-cond-branch="{branch}"{hide}>{body_html}</span>'
+                )
+        dest_escaped = html.escape(str(dest), quote=True)
+        target_attrs = (
+            EXTERNAL_LINK_ATTRS if is_external_href(str(dest), site_base_url) else ""
+        )
+        return f'<a href="{dest_escaped}"{target_attrs} tabindex="-1">{body_html}</a>'
+    if func == "raw":
+        text = node.get("text", "")
+        id_attr = _raw_id_attr(raw_copy_id(text), seen_raw_ids)
+        if node.get("block"):
+            return f"<pre{id_attr}><code>{html.escape(text)}</code></pre>"
+        return f"<code{id_attr}>{html.escape(text)}</code>"
+
+    parts: List[str] = []
+    text_val = node.get("text")
+    if isinstance(text_val, str):
+        parts.append(html.escape(text_val))
+    for key in ("body", "children", "child", "value", "values", "content"):
+        if key in node:
+            parts.append(
+                flatten_doc_node_to_html(
+                    node[key], emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+                )
+            )
+    if not parts:
+        for key, value in node.items():
+            if key not in ("func", "text") and isinstance(value, (dict, list)):
+                parts.append(
+                    flatten_doc_node_to_html(
+                        value, emphasis_map, site_base_url, seen_raw_ids, inline_math, used_inline_math
+                    )
+                )
+    return "".join(parts)
+
+
+def _is_inline_metadata(node: Dict[str, Any]) -> bool:
+    t = node.get("t", "")
+    return t in ("b", "i", "lnk", "eq-il", "fn") or (t == "raw" and not node.get("bl"))
+
+
+def _group_list_items(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(nodes):
+        t = nodes[i].get("t")
+        if t in ("li", "eli"):
+            tag = "ul" if t == "li" else "ol"
+            items: List[Dict[str, Any]] = []
+            while i < len(nodes):
+                cur_t = nodes[i].get("t")
+                if cur_t == t:
+                    item = nodes[i]
+                    if "children" in item:
+                        item["children"] = _group_list_items(item["children"])
+                    items.append(item)
+                    i += 1
+                elif _is_inline_metadata(nodes[i]):
+                    i += 1
+                else:
+                    break
+            result.append({"t": tag, "children": items})
+        else:
+            if "children" in nodes[i]:
+                nodes[i]["children"] = _group_list_items(nodes[i]["children"])
+            result.append(nodes[i])
+            i += 1
+    return result
+
+
+def _build_node_tree(flat_elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    root: List[Dict[str, Any]] = []
+    stack: List[List[Dict[str, Any]]] = [root]
+    for i, elem in enumerate(flat_elements):
+        t = elem.get("t", "")
+        elem["_idx"] = i
+        if t.endswith("/o"):
+            node = {k: v for k, v in elem.items() if k != "t"}
+            node["t"] = t[:-2]
+            node["children"] = []
+            stack[-1].append(node)
+            stack.append(node["children"])
+        elif t.endswith("/c"):
+            if len(stack) > 1:
+                stack.pop()
+        else:
+            stack[-1].append(elem)
+    return _group_list_items(root)
+
+
+def build_hidden_text(
+    doc_elements: List[Dict[str, Any]],
+    post_title: str,
+    post_subtitle: Optional[str],
+    asset_hash: str,
+    nav_links: Optional[List[Tuple[str, str]]] = None,
+    site_base_url: Optional[str] = None,
+) -> str:
+    header: List[str] = [f"<h1>{html.escape(post_title)}</h1>"]
+    if post_subtitle:
+        header.append(f'<p class="subtitle">{html.escape(post_subtitle)}</p>')
+
+    skip_count = 1 + (1 if post_subtitle else 0)
+    fig_counts: Dict[str, int] = {}
+
+    elem_links: Dict[int, List[Tuple[str, str]]] = {}
+    elem_inline_math: Dict[int, List[Tuple[int, str]]] = {}
+    seen_raw_ids: Set[str] = set()
+    consumed_eq_il: Set[int] = set()
+    ghost_texts: Set[str] = set()
+    footnote_bodies: List[Dict[str, Any]] = []
+    last_text_idx: Optional[int] = None
+
+    for i, elem in enumerate(doc_elements):
+        t = elem.get("t", "")
+        if t == "lnk":
+            href = elem.get("href", "")
+            if href.startswith("#cond=") or (
+                href.startswith("#action=") and not href.startswith("#action=copy:")
+            ):
+                text = plain_text(elem.get("b", ""))
+                if text:
+                    ghost_texts.add(text)
+            if not href or href.startswith(("#action=", "#cond=")):
+                continue
+            label = plain_text(elem.get("b", ""))
+            if label and last_text_idx is not None:
+                elem_links.setdefault(last_text_idx, []).append((href, label))
+        elif t == "eq-il":
+            if last_text_idx is not None:
+                elem_inline_math.setdefault(last_text_idx, []).append(
+                    (i, f"<code>${_format_eq_text(elem)}$</code>")
+                )
+        elif t == "fn":
+            footnote_bodies.append(elem)
+        elif t in ("par", "h", "info", "dt", "li", "eli"):
+            last_text_idx = i
+        elif t not in ("b", "i", "raw", "eq-il", "fn"):
+            last_text_idx = None
+
+    emphasis_map = _collect_emphasis_text(
+        [e for e in doc_elements if e.get("t") in ("b", "i")]
+    )
+    tree = _build_node_tree(doc_elements)
+
+    def fig_label(cap: Dict[str, Any], default_kind: str) -> str:
+        kind = cap.get("kind", default_kind)
+        fig_counts[kind] = fig_counts.get(kind, 0) + 1
+        n = fig_counts[kind]
+        supplement = cap.get("supplement")
+        sup_text = plain_text(supplement) if supplement else "Figure"
+        fmt = cap.get("numbering") or "1"
+        sep = cap.get("separator")
+        sep_text = plain_text(sep) if sep else ":"
+        return f"{sup_text}\u00a0{_format_numbering(n, fmt)}{sep_text}"
+
+    def _links_for(node: Dict[str, Any]) -> Optional[List[Tuple[str, str]]]:
+        idx = node.get("_idx")
+        return elem_links.get(idx) if idx is not None else None
+
+    def render(nodes: List[Dict[str, Any]], skip_pars: int = 0) -> List[str]:
+        parts: List[str] = []
+        skipped_pars = 0
+        trailing_residual: Optional[str] = None
+
+        def render_table(table_node: Any) -> Optional[str]:
+            if not isinstance(table_node, dict):
+                return None
+            try:
+                rows = extract_table_rows(table_node)
+                return _render_table_html(rows, seen_raw_ids=seen_raw_ids) or None
+            except Exception:
+                return None
+
+        def _flatten(
+            val: Any, node_idx: Optional[int] = None, commit_math: bool = True
+        ) -> Tuple[str, List[int]]:
+            math_items = (
+                list(elem_inline_math.get(node_idx, ()))
+                if node_idx is not None
+                else None
+            )
+            used: List[int] = []
+            rendered = flatten_doc_node_to_html(
+                val,
+                emphasis_map,
+                site_base_url,
+                seen_raw_ids=seen_raw_ids,
+                inline_math=math_items,
+                used_inline_math=used,
+            )
+            if commit_math and used:
+                consumed_eq_il.update(used)
+            return rendered, used
+
+        for node in nodes:
+            t = node.get("t")
+
+            if t == "lnk":
+                frag, is_standalone = _render_form_control(
+                    node.get("href", ""), node.get("b", "")
+                )
+                if frag is not None:
+                    if is_standalone:
+                        parts.append(frag)
+                    else:
+                        suffix = trailing_residual or ""
+                        trailing_residual = None
+                        if parts and parts[-1].endswith("</p>"):
+                            parts[-1] = parts[-1][:-4] + frag + suffix + "</p>"
+                        else:
+                            parts.append(frag.strip() + suffix)
+                continue
+
+            if t == "par" and skip_pars > 0 and skipped_pars < skip_pars:
+                skipped_pars += 1
+                continue
+
+            if t in ("raw", "b", "i") and not node.get("bl"):
+                continue
+
+            if t in ("ul", "ol"):
+                item_tag = "li" if t == "ul" else "eli"
+                items: List[str] = []
+                for child in node.get("children", []):
+                    if child.get("t") != item_tag:
+                        continue
+                    children = child.get("children", [])
+                    if children:
+                        inner = render(children)
+                        if (
+                            len(inner) == 1
+                            and inner[0].startswith("<p>")
+                            and inner[0].endswith("</p>")
+                        ):
+                            items.append(f"<li>{inner[0][3:-4]}</li>")
+                        else:
+                            items.append(f"<li>{''.join(inner)}</li>")
+                    else:
+                        body_html, _ = _flatten(child.get("b", ""), child.get("_idx"))
+                        body_html = body_html.strip()
+                        links = _links_for(child)
+                        if links:
+                            body_html = _embed_links_in_text(
+                                body_html, links, site_base_url
+                            )
+                        items.append(f"<li>{body_html}</li>")
+                if items:
+                    parts.append(f"<{t}>{''.join(items)}</{t}>")
+
+            elif t == "blockquote":
+                inner = render(node.get("children", []))
+                if not inner:
+                    body_html, _ = _flatten(node.get("b", ""), node.get("_idx"))
+                    body_html = body_html.strip()
+                    if body_html:
+                        inner = [f"<p>{body_html}</p>"]
+                attr = node.get("attr")
+                attr_html = ""
+                if attr is not None:
+                    attr_text, _ = _flatten(attr)
+                    attr_text = attr_text.strip()
+                    if attr_text:
+                        attr_html = f"<footer>{attr_text}</footer>"
+                parts.append(f"<blockquote>{''.join(inner)}{attr_html}</blockquote>")
+
+            elif t == "fig-t":
+                table_child = next(
+                    (c for c in node.get("children", []) if c.get("t") == "table"), None
+                )
+                if table_child is not None:
+                    table_html = render_table(table_child.get("b"))
+                    if table_html:
+                        cap = node.get("cap")
+                        if isinstance(cap, dict):
+                            label = fig_label(cap, "table")
+                            body_text, _ = _flatten(cap.get("body", ""))
+                            caption = " ".join(f"{label} {body_text}".split())
+                            parts.append(
+                                f"<figure>{table_html}<figcaption>{caption}</figcaption></figure>"
+                            )
+                        else:
+                            parts.append(table_html)
+
+            elif t == "table":
+                table_html = render_table(node.get("b"))
+                if table_html:
+                    parts.append(table_html)
+
+            elif t == "h":
+                level = min(node.get("l", 1) + 1, 6)
+                body_html, _ = _flatten(node.get("b", ""), node.get("_idx"))
+                links = _links_for(node)
+                if links:
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
+                parts.append(f"<h{level}>{body_html}</h{level}>")
+
+            elif t == "par":
+                body_html, used_math = _flatten(
+                    node.get("b", ""), node.get("_idx"), commit_math=False
+                )
+                body_html = body_html.strip()
+                if not body_html:
+                    continue
+                if ghost_texts and "data-cond-id=" not in body_html:
+                    raw_text = plain_text(node.get("b", ""))
+                    residual = raw_text
+                    for gt in sorted(ghost_texts, key=len, reverse=True):
+                        residual = residual.replace(gt, "")
+                    residual = residual.strip()
+                    if not residual:
+                        continue
+                    if residual != raw_text:
+                        trailing_residual = html.escape(residual)
+                        continue
+                if used_math:
+                    consumed_eq_il.update(used_math)
+                links = _links_for(node)
+                if links:
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
+                parts.append(f"<p>{body_html}</p>")
+
+            elif t == "raw":
+                raw_text = node.get("x", "")
+                id_attr = _raw_id_attr(raw_copy_id(raw_text), seen_raw_ids)
+                parts.append(f"<pre{id_attr}><code>{html.escape(raw_text)}</code></pre>")
+
+            elif t == "info":
+                body_html, _ = _flatten(node.get("b", ""), node.get("_idx"))
+                body_html = " ".join(body_html.split())
+                links = _links_for(node)
+                if links:
+                    body_html = _embed_links_in_text(body_html, links, site_base_url)
+                parts.append(f"<aside><p>{body_html}</p></aside>")
+
+            elif t == "dt":
+                term_html, _ = _flatten(node.get("term", ""))
+                term_html = term_html.strip()
+                desc_html, _ = _flatten(node.get("b", ""), node.get("_idx"))
+                desc_html = desc_html.strip()
+                links = _links_for(node)
+                if links:
+                    term_html = _embed_links_in_text(term_html, links, site_base_url)
+                    desc_html = _embed_links_in_text(desc_html, links, site_base_url)
+                parts.append(f"<dl><dt>{term_html}</dt><dd>{desc_html}</dd></dl>")
+
+            elif t in ("eq", "eq-il"):
+                if t == "eq-il" and node.get("_idx") in consumed_eq_il:
+                    continue
+                eq_text = _format_eq_text(node)
+                if t == "eq-il":
+                    code_frag = f"<code>${eq_text}$</code>"
+                    if parts and parts[-1].startswith("<p>") and parts[-1].endswith("</p>"):
+                        parts[-1] = f"{parts[-1][:-4]} {code_frag}</p>"
+                    else:
+                        parts.append(code_frag)
+                else:
+                    parts.append(f"<p><code>$ {eq_text} $</code></p>")
+
+            elif t == "fig":
+                body = node.get("b", {})
+                cap_node = node.get("cap")
+                caption = ""
+                if isinstance(cap_node, dict):
+                    label = fig_label(cap_node, "image")
+                    body_text, _ = _flatten(cap_node.get("body", ""))
+                    caption = " ".join(f"{label} {body_text}".split())
+                if isinstance(body, dict) and body.get("func") == "image":
+                    source = body.get("source", "")
+                    alt = _extract_alt(body.get("alt"))
+                    src_hash = hashlib.sha1(source.encode()).hexdigest()[:ASSET_HASH_LEN]
+                    img_src = html.escape(
+                        f"assets/image.{src_hash}.{asset_hash}.webp", quote=True
+                    )
+                    alt_attr = (
+                        f' alt="{html.escape(alt, quote=True)}"'
+                        if alt
+                        else ' role="presentation"'
+                    )
+                    parts.append(
+                        f'<figure><p><img src="{img_src}"{alt_attr}></p>'
+                        f"<figcaption>{caption}</figcaption></figure>"
+                    )
+                else:
+                    alt = _extract_alt(node.get("alt"))
+                    if alt or caption:
+                        inner_parts: List[str] = []
+                        if alt:
+                            inner_parts.append(f"<p>{html.escape(alt)}</p>")
+                        if caption:
+                            inner_parts.append(f"<figcaption>{caption}</figcaption>")
+                        parts.append(f"<figure>{''.join(inner_parts)}</figure>")
+
+        return parts
+
+    body_parts = [p for p in render(tree, skip_pars=skip_count) if p != "<p></p>"]
+
+    if footnote_bodies:
+        entries = []
+        for idx, fn in enumerate(footnote_bodies, start=1):
+            entry_html = flatten_doc_node_to_html(
+                fn.get("b", ""), emphasis_map, site_base_url, seen_raw_ids=seen_raw_ids
+            ).strip()
+            entries.append(f'<li id="fn-{idx}">{entry_html}</li>')
+        body_parts.append(
+            '<section class="footnotes" aria-label="Footnotes">'
+            f'<ol>{"".join(entries)}</ol></section>'
+        )
+
+    result = ""
+    if nav_links:
+        nav_items = " · ".join(
+            f'<a href="{html.escape(href, quote=True)}" tabindex="-1">'
+            f"{html.escape(label)}</a>"
+            for href, label in nav_links
+        )
+        result += f'<p class="post-nav">{nav_items}</p>\n'
+
+    result += "\n".join(header + body_parts)
+    return result

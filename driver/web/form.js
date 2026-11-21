@@ -68,34 +68,23 @@
         });
   };
 
-  const refreshCond = (condId) => {
-    const result = evaluateCond(condId);
-    const selector = '[data-cond-id="' + CSS.escape(condId) + '"]';
+  const refreshAllConds = () => {
+    const cache = new Map();
     const toggle = (el) => {
-      const branch = el.getAttribute('data-cond-branch');
-      const show = branch === '1' ? result : !result;
+      const condId = el.getAttribute('data-cond-id');
+      let result = cache.get(condId);
+      if (result === undefined) {
+        result = evaluateCond(condId);
+        cache.set(condId, result);
+      }
+      const show = el.getAttribute('data-cond-branch') === '1' ? result : !result;
       el.style.display = show ? '' : 'none';
     };
     eachSvgDoc((svgDoc) => {
-      svgDoc.querySelectorAll(selector).forEach(toggle);
-    });
-    document.querySelectorAll(selector).forEach(toggle);
-  };
-
-  const refreshAllConds = () => {
-    const ids = new Set();
-    eachSvgDoc((svgDoc) => {
-      svgDoc.querySelectorAll('[data-cond-id]').forEach((el) => {
-        ids.add(el.getAttribute('data-cond-id'));
-      });
+      svgDoc.querySelectorAll('[data-cond-id]').forEach(toggle);
       syncAriaStates(svgDoc);
     });
-    document.querySelectorAll('[data-cond-id]').forEach((el) => {
-      ids.add(el.getAttribute('data-cond-id'));
-    });
-    for (const condId of ids) {
-      refreshCond(condId);
-    }
+    document.querySelectorAll('[data-cond-id]').forEach(toggle);
   };
 
   const findVisibleInputAnchor = (id) => {
@@ -344,18 +333,14 @@
   const toggleCheckbox = (id) => {
     const cb = SR_CHECKBOXES.get(id);
     if (cb) {
-      cb.checked = !cb.checked;
-      fireInput(id, cb.checked ? 'true' : '');
+      form.set(id, !cb.checked);
     }
   };
 
   const selectRadio = (group, value) => {
-    const radios = SR_RADIOS.get(group);
-    if (!radios) return;
-    for (const r of radios) {
-      r.checked = r.value === value;
+    if (SR_RADIOS.has(group)) {
+      form.set(group, value);
     }
-    fireInput(group, value);
   };
 
   const cycleRadio = (arg, context, event) => {

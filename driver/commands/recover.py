@@ -2,55 +2,40 @@ import os
 import shutil
 import sys
 from argparse import Namespace
-from typing import List, Optional, Tuple
 
-from .revisions import latest_rev
-from .submission_workspace import load_manifest
-from .utils import safe_join_child
-
-
-def _find_latest_post_directory(
-    posts_dir: str, workspace_name: str
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    latest = latest_rev(posts_dir, workspace_name)
-    if latest is None:
-        return None, None, None
-    return latest.date, latest.entry_name, latest.path
+from core.paths import safe_join_child
+from core.workspace import latest_rev, load_manifest
 
 
 def _recover_from_manifest(source_dir: str, workspace_path: str) -> int:
-    manifest_files: List[str] = load_manifest(source_dir)["files"]
-
-    copied_count = 0
-    for rel_path in manifest_files:
+    copied = 0
+    for rel_path in load_manifest(source_dir)["files"]:
         src_path = safe_join_child(source_dir, rel_path)
         dst_path = safe_join_child(workspace_path, rel_path)
         if not os.path.isfile(src_path):
             continue
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         shutil.copy2(src_path, dst_path)
-        copied_count += 1
-    return copied_count
+        copied += 1
+    return copied
 
 
 def run_recover(args: Namespace) -> None:
     workspace_name: str = args.name
-
     posts_dir = os.path.join(args.root_dir, "posts")
-    recovered_date, recovered_name, post_dir = _find_latest_post_directory(
-        posts_dir, workspace_name
-    )
-    if not post_dir:
+    latest = latest_rev(posts_dir, workspace_name)
+    if latest is None:
         print(
             f"No post revision found in '{posts_dir}' for workspace '{workspace_name}'.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    source_dir = os.path.join(post_dir, "source")
+    source_dir = os.path.join(latest.path, "source")
     if not os.path.isdir(source_dir):
         print(
-            f"Cannot recover workspace: '{source_dir}' does not exist.", file=sys.stderr
+            f"Cannot recover workspace: '{source_dir}' does not exist.",
+            file=sys.stderr,
         )
         sys.exit(1)
 
@@ -77,9 +62,7 @@ def run_recover(args: Namespace) -> None:
         )
         sys.exit(1)
 
-    copied_count = _recover_from_manifest(source_dir, workspace_path)
-
-    if copied_count == 0:
+    if _recover_from_manifest(source_dir, workspace_path) == 0:
         print(
             f"No recoverable source files were found for '{workspace_name}' in '{source_dir}'.",
             file=sys.stderr,
@@ -88,5 +71,5 @@ def run_recover(args: Namespace) -> None:
 
     print(
         f"Recovered workspace '{workspace_name}' at '{workspace_path}' "
-        f"from revision '{recovered_date}/{recovered_name}'."
+        f"from revision '{latest.date}/{latest.entry_name}'."
     )
