@@ -14,8 +14,3 @@ form.on('answer', () => {
 });
 
 form.cond('summary', () => form.get('item_1') === 'true' || form.get('item_2') === 'true');
-
-form.cond('color-picked', () => form.get('color') !== '');
-form.cond('color-red', () => form.get('color') === 'red');
-form.cond('color-green', () => form.get('color') === 'green');
-form.cond('color-blue', () => form.get('color') === 'blue');

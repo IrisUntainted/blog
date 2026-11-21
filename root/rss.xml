@@ -6,7 +6,14 @@
     <description>It is unlikely that there will be many posts here.</description>
     <language>en-us</language>
     <atom:link href="https://blog.owo.li/rss.xml" rel="self" type="application/rss+xml" />
-    <lastBuildDate>Tue, 19 May 2026 00:00:00 +0000</lastBuildDate>
+    <lastBuildDate>Wed, 23 Sep 2026 00:00:00 +0000</lastBuildDate>
+    <item>
+      <title>Typing Exercise</title>
+      <link>https://blog.owo.li/posts/2026-09-23/typing-exercise/index.html</link>
+      <guid isPermaLink="true">https://blog.owo.li/posts/2026-09-23/typing-exercise/index.html</guid>
+      <pubDate>Wed, 23 Sep 2026 00:00:00 +0000</pubDate>
+      <description>I did get faster at typing as I typed this.</description>
+    </item>
     <item>
       <title>Iris Network</title>
       <link>https://blog.owo.li/posts/2026-05-19/iris-network/index.html</link>

@@ -41,7 +41,12 @@ Pick a _color_:
 #radio("color", "green")[Green]
 #radio("color", "blue")[Blue]
 
-#cond("color-picked", [_No color selected._], [])
-#cond("color-red", [], [You picked #text(fill: red)[_red_].])
-#cond("color-green", [], [You picked #text(fill: green)[_green_].])
-#cond("color-blue", [], [You picked #text(fill: blue)[_blue_].])
+#radio_switch(
+  "color",
+  (
+    red: [You picked #text(fill: red)[_red_].],
+    green: [You picked #text(fill: green)[_green_].],
+    blue: [You picked #text(fill: blue)[_blue_].],
+  ),
+  default: [_No color selected._],
+)
