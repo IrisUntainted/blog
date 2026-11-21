@@ -14,6 +14,8 @@ html {
 
     --svg-paper-bg: #ffffff;
     --svg-text: #141414;
+    --svg-quote-text: #373737;
+    --svg-caption-text: #5a5a5a;
     --svg-muted-text: #646464;
     --svg-footer-text: #767676;
     --svg-code-bg: #f5f5f5;
@@ -43,6 +45,8 @@ html {
 
     --svg-paper-bg: #161b22;
     --svg-text: #e8ecf2;
+    --svg-quote-text: #cdd3df;
+    --svg-caption-text: #b4bbc9;
     --svg-muted-text: #a7b0bf;
     --svg-footer-text: #7f8897;
     --svg-code-bg: #222a34;

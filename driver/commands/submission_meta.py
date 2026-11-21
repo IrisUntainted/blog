@@ -132,12 +132,19 @@ def _build_meta_typst_source(
 def _build_meta_hidden_text(
     meta_fields: Dict[str, str], source_files: List[str]
 ) -> str:
-    lines: List[str] = ["<h1>Meta</h1>", "<ul>"]
+    seen_raw_ids: set = set()
+    lines: List[str] = [
+        '<p class="post-nav"><a href="index.html" tabindex="-1">Back</a></p>',
+        "<h1>Meta</h1>",
+        "<ul>",
+    ]
     for key, value in meta_fields.items():
         copy_id = make_raw_copy_id(value)
+        id_attr = "" if copy_id in seen_raw_ids else f' id="raw-{copy_id}"'
+        seen_raw_ids.add(copy_id)
         lines.append(
             f"<li>{html.escape(key)}: "
-            f'<code id="raw-{copy_id}">{html.escape(value)}</code></li>'
+            f"<code{id_attr}>{html.escape(value)}</code></li>"
         )
     lines.append("</ul>")
     lines.append("<h2>Source Files</h2>")

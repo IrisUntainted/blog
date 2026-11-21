@@ -10,6 +10,8 @@
   const SVG_COLOR_TOKENS = [
     '--svg-paper-bg',
     '--svg-text',
+    '--svg-quote-text',
+    '--svg-caption-text',
     '--svg-muted-text',
     '--svg-footer-text',
     '--svg-code-bg',
@@ -17,12 +19,15 @@
     '--svg-code-comment',
     '--svg-code-green',
     '--svg-code-dark-green',
+    '--svg-code-teal',
+    '--svg-code-dark-red',
     '--svg-code-red',
     '--svg-code-blue',
     '--svg-code-violet',
     '--svg-code-magenta',
     '--svg-muted-stroke',
     '--svg-code-gutter',
+    '--svg-focus-ring',
   ];
 
   const resolveTheme = (theme) =>
@@ -43,20 +48,28 @@
   };
 
   const parseSvgCustomThemeVars = (svgRoot) => {
-    const style = svgRoot.querySelector('style');
-    if (!style) return null;
-    const text = style.textContent;
+    const styles = svgRoot.querySelectorAll('style');
+    if (!styles.length) return null;
+    let text = '';
+    for (const style of styles) {
+      text += style.textContent + '\n';
+    }
     const darkMatch = text.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{[^{}]*\{([^}]*)\}/);
     if (!darkMatch) return null;
+    const lightDefaults = {};
+    for (const m of text.matchAll(/var\(\s*(--svg-[\w-]+)\s*,\s*([^)]+)\)/g)) {
+      lightDefaults[m[1]] = m[2].trim();
+    }
     const vars = {};
     for (const m of darkMatch[1].matchAll(/(--svg-[\w-]+)\s*:\s*([^;]+)/g)) {
-      vars[m[1]] = m[2].trim();
+      const token = m[1];
+      vars[token] = {dark: m[2].trim(), light: lightDefaults[token] || ''};
     }
     return vars;
   };
 
   const applyThemeToSvgRoot = (svgRoot, computedStyles) => {
-    if (!svgRoot) {
+    if (!svgRoot || svgRoot.tagName.toLowerCase() !== 'svg') {
       return;
     }
     for (const token of SVG_COLOR_TOKENS) {
@@ -68,10 +81,12 @@
     const customVars = parseSvgCustomThemeVars(svgRoot);
     if (!customVars) return;
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    for (const [token, darkValue] of Object.entries(customVars)) {
+    for (const [token, pair] of Object.entries(customVars)) {
       if (SVG_COLOR_TOKENS.includes(token)) continue;
       if (isDark) {
-        svgRoot.style.setProperty(token, darkValue);
+        svgRoot.style.setProperty(token, pair.dark);
+      } else if (pair.light) {
+        svgRoot.style.setProperty(token, pair.light);
       } else {
         svgRoot.style.removeProperty(token);
       }
@@ -132,7 +147,9 @@
 
   const bindSvgActionsToObject = (pageObject) => {
     const svgDocument = pageObject.contentDocument;
-    if (!svgDocument || BOUND_SVG_DOCUMENTS.has(svgDocument)) {
+    if (!svgDocument ||
+        svgDocument.documentElement?.tagName.toLowerCase() !== 'svg' ||
+        BOUND_SVG_DOCUMENTS.has(svgDocument)) {
       return;
     }
     BOUND_SVG_DOCUMENTS.add(svgDocument);
@@ -202,6 +219,7 @@
     root.setAttribute('data-theme', resolvedTheme);
     root.classList.toggle('theme-light', resolvedTheme === LIGHT_THEME);
     root.classList.toggle('theme-dark', resolvedTheme === DARK_THEME);
+    root.style.colorScheme = resolvedTheme;
 
     const computedStyles = window.getComputedStyle(root);
     document.querySelectorAll('object.page[type="image/svg+xml"]')
@@ -304,4 +322,11 @@
 
   const initialTheme = getSavedTheme() || getPreferredTheme();
   applyTheme(initialTheme);
+
+  const colorSchemeMedia = window.matchMedia?.('(prefers-color-scheme: dark)');
+  colorSchemeMedia?.addEventListener?.('change', (event) => {
+    if (!getSavedTheme()) {
+      applyTheme(event.matches ? DARK_THEME : LIGHT_THEME, false);
+    }
+  });
 })();

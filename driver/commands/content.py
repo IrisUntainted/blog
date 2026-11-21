@@ -21,12 +21,14 @@ from .utils import (
     _query_nodes_from_source,
     _update_hash_with_typ_files,
     CompileBuildRequest,
+    EXTERNAL_LINK_ATTRS,
     HtmlBuildConfig,
     MobileCompileConfig,
     compile_html,
     extract_friend_card_symbols,
     first_desc,
     hash_text_with_paths,
+    is_external_href,
     make_inputs,
     minify_html,
     query_title_subtitle_from_source,
@@ -93,7 +95,13 @@ def _build_hidden_text(
     parsed_subtitle: str,
     posts_by_date: PostsByDate,
 ) -> str:
-    sections: List[str] = [f"<h1>{html.escape(parsed_title)}</h1>"]
+    sections: List[str] = [
+        '<p class="post-nav">'
+        '<a href="rss.xml" tabindex="-1">RSS</a> · '
+        '<a href="friends/index.html" tabindex="-1">Friends</a>'
+        "</p>",
+        f"<h1>{html.escape(parsed_title)}</h1>",
+    ]
     if parsed_subtitle:
         sections.append(f"<p>{html.escape(parsed_subtitle)}</p>")
     sections.append("<h1>Content</h1>")
@@ -190,18 +198,27 @@ def _is_remote_avatar(avatar: str) -> bool:
 
 
 def _build_friends_hidden_text(
-    title: str, subtitle: Optional[str], friends: List[PostEntry]
+    title: str,
+    subtitle: Optional[str],
+    friends: List[PostEntry],
+    site_base_url: Optional[str] = None,
 ) -> str:
-    parts: List[str] = [f"<h1>{html.escape(title)}</h1>"]
+    parts: List[str] = [
+        '<p class="post-nav"><a href="../index.html" tabindex="-1">Back</a></p>',
+        f"<h1>{html.escape(title)}</h1>",
+    ]
     if subtitle:
         parts.append(f"<p>{html.escape(subtitle)}</p>")
-    parts.append("<h1>Friends</h1>")
     for friend in friends:
         name = html.escape(str(friend["name"]))
-        url = html.escape(str(friend["url"]))
+        raw_url = str(friend["url"])
+        url = html.escape(raw_url, quote=True)
+        target_attrs = (
+            EXTERNAL_LINK_ATTRS if is_external_href(raw_url, site_base_url) else ""
+        )
         description = html.escape(str(friend.get("description", "")))
         parts.append(
-            f'<p class="friend"><a href="{url}" tabindex="-1">{name}</a>'
+            f'<p class="friend"><a href="{url}"{target_attrs} tabindex="-1">{name}</a>'
             f" — {description}</p>"
         )
     return "\n".join(parts)
@@ -240,7 +257,8 @@ def build_friends_page(
     repo_root = os.path.dirname(base_dir)
     workspace_data = os.path.join(repo_root, "workspace", "friends.typ")
     workspace_avatars = os.path.join(repo_root, "workspace", "friends-assets")
-    snapshot_dir = os.path.join(root_dir, "friends-source")
+    friends_dir = os.path.join(root_dir, "friends")
+    snapshot_dir = os.path.join(friends_dir, "source")
     snapshot_data = os.path.join(snapshot_dir, "friends.typ")
     snapshot_avatars = os.path.join(snapshot_dir, "friends-assets")
     if os.path.isfile(workspace_data):
@@ -262,7 +280,9 @@ def build_friends_page(
     friends = nodes[0]["value"] if nodes else []
 
     title, subtitle = query_title_subtitle_from_source(friends_template, repo_root)
-    hidden_text = _build_friends_hidden_text(title, subtitle, friends)
+    hidden_text = _build_friends_hidden_text(
+        title, subtitle, friends, site_base_url=base_url
+    )
 
     output_dir = os.path.join(build_base, "friends")
     reset_dir(output_dir)
@@ -283,8 +303,7 @@ def build_friends_page(
     og_url = page_url(
         base_url=base_url,
         root_dir=root_dir,
-        dest_dir=root_dir,
-        html_filename="friends.html",
+        dest_dir=friends_dir,
     )
 
     compile_html(
@@ -293,19 +312,18 @@ def build_friends_page(
             output_dir=output_dir,
             asset_hash=asset_hash,
             file_prefix="friends",
-            typst_inputs=make_inputs(shared_inputs={"back_href": "./index.html"}),
+            typst_inputs=make_inputs(shared_inputs={"back_href": "../index.html"}),
             mobile=MobileCompileConfig(svg_name_prefix="m-friends"),
             html=HtmlBuildConfig(
                 template_path=os.path.join(base_dir, "index.template.html"),
-                dest_dir=root_dir,
-                html_filename="friends.html",
+                dest_dir=friends_dir,
                 title_format="Friends Page {i}",
                 svg_name_prefix="friends",
                 default_title=title,
                 asset_context=asset_context,
                 description=subtitle or title,
                 hidden_text_override=hidden_text,
-                asset_dest_dir=os.path.join(root_dir, "assets"),
+                asset_dest_dir=os.path.join(friends_dir, "assets"),
                 image_source_dir=os.path.dirname(base_dir),
                 og_type="website",
                 og_url=og_url,
@@ -411,7 +429,13 @@ def update_content(args: Namespace) -> None:
         base_url=base_url,
     )
 
-    glyph_target_dirs: List[str] = [root_dir, content_asset_dir]
+    friends_dir = os.path.join(root_dir, "friends")
+    glyph_target_dirs: List[str] = [
+        root_dir,
+        content_asset_dir,
+        friends_dir,
+        os.path.join(friends_dir, "assets"),
+    ]
     for date_str in sorted(os.listdir(dest_base_dir), reverse=True):
         date_dir = os.path.join(dest_base_dir, date_str)
         if not os.path.isdir(date_dir):
@@ -436,9 +460,10 @@ def update_content(args: Namespace) -> None:
     # <use>s (revealed by friends.js) are never run through svgo's
     # removeHiddenElems during refresh.
     for pattern in ("friends[0-9]*.svg", "m-friends[0-9]*.svg"):
-        for svg_path in glob.glob(os.path.join(root_dir, "assets", pattern)):
+        for svg_path in glob.glob(os.path.join(friends_dir, "assets", pattern)):
             extract_friend_card_symbols(svg_path)
     minify_html(os.path.join(root_dir, "index.html"))
+    minify_html(os.path.join(friends_dir, "index.html"))
 
     sitemap_lines = _build_sitemap_lines(base_url, posts_by_date)
     rss_lines = _build_rss_lines(

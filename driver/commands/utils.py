@@ -144,6 +144,8 @@ a:focus-visible > path {
     --svg-code-comment: #8e97a6;
     --svg-code-green: #86df80;
     --svg-code-dark-green: #74cad3;
+    --svg-code-teal: #6ec7d6;
+    --svg-code-dark-red: #e0b8b8;
     --svg-code-red: #ff8d99;
     --svg-code-blue: #8ca8ff;
     --svg-code-violet: #c792ea;
@@ -154,6 +156,7 @@ a:focus-visible > path {
   }
 }
 a[href^="#cond="] { pointer-events: none; }
+[data-cond-branch="1"] { display: var(--svg-cond-b1, none); }
 </style>
 """.strip()
 
@@ -1748,7 +1751,7 @@ def _parse_svg_action_href(href: Optional[str]) -> Tuple[Optional[str], Dict[str
 
 
 def _action_token_role(action_token: str) -> Optional[str]:
-    if action_token == "theme" or action_token.startswith(_COPY_PREFIX):
+    if action_token in ("theme", "layout") or action_token.startswith(_COPY_PREFIX):
         return "button"
     if action_token.startswith(_INPUT_PREFIX):
         return "textbox"
@@ -2081,6 +2084,8 @@ def _inject_svg_anchor_accessibility(
         role, tabindex = _infer_svg_anchor_attrs(action_token, action_metadata)
         if role is not None and "role" not in el.attrib:
             el.set("role", role)
+        if role in ("checkbox", "radio") and "aria-checked" not in el.attrib:
+            el.set("aria-checked", "false")
 
         has_tabindex = "tabindex" in el.attrib
         action_href = href.strip() if href else ""
@@ -2107,6 +2112,10 @@ def _inject_svg_anchor_accessibility(
                 title_el.tail = el.text
                 el.text = None
             el.insert(0, title_el)
+
+    for img in xmlutil.iter_local(root, "image"):
+        if "role" not in img.attrib:
+            img.set("role", "img" if img.get("aria-label") else "presentation")
 
     return xmlutil.serialize_svg(root)
 
@@ -2855,6 +2864,7 @@ def compile_html(request: CompileBuildRequest) -> str:
             os.path.join(request.html.dest_dir, request.html.html_filename)
         )
         page_asset_dir = request.html.asset_dest_dir or request.html.dest_dir
+        os.makedirs(page_asset_dir, exist_ok=True)
         m_page_links, _, _ = _process_svg_set(
             source_dir=request.output_dir,
             asset_dir=page_asset_dir,

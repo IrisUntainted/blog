@@ -17,8 +17,6 @@
       .forEach((node) => srOnly.appendChild(node));
   }
 
-  const readHref = (el) =>
-    el.getAttribute("href") || el.getAttribute("xlink:href") || "";
   const writeHref = (el, val) => {
     if (el.hasAttribute("xlink:href")) {
       el.setAttribute("xlink:href", val);
@@ -36,22 +34,46 @@
   };
 
   const bound = new WeakSet();
-  const init = (pageObject) => {
+  const init = (pageObject, force = false) => {
     const svgDoc = pageObject.contentDocument;
-    if (!svgDoc || bound.has(svgDoc)) {
-      return;
+    if (
+      !svgDoc ||
+      svgDoc.documentElement?.tagName.toLowerCase() !== "svg" ||
+      bound.has(svgDoc)
+    ) {
+      return false;
     }
-    if (!svgDoc.querySelector("use.friend-card")) {
-      return;
+    const count = svgDoc.querySelectorAll("use.friend-card").length;
+    if (count === 0 || (!force && n > 0 && count < n)) {
+      return false;
     }
     bound.add(svgDoc);
     applyToSvg(svgDoc);
+    return true;
+  };
+
+  // Reveal cards as soon as the SVG DOM is parsed rather than blocking on
+  // slow or unreachable remote avatar <image> subresources before `load`.
+  const watch = (pageObject) => {
+    if (!pageObject.getAttribute("data") || init(pageObject, false)) {
+      return;
+    }
+    let frames = 0;
+    const poll = () => {
+      if (init(pageObject, false) || ++frames > 180) return;
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
   };
 
   document
     .querySelectorAll('object.page[type="image/svg+xml"]')
     .forEach((pageObject) => {
-      pageObject.addEventListener("load", () => init(pageObject));
-      init(pageObject);
+      pageObject.addEventListener("load", () => init(pageObject, true));
+      new MutationObserver(() => watch(pageObject)).observe(pageObject, {
+        attributes: true,
+        attributeFilter: ["data"],
+      });
+      watch(pageObject);
     });
 })();

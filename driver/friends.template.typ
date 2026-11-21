@@ -1,10 +1,10 @@
 #import "driver/template.typ": action, driver_page, nav_link, requires_asset, right_top_bar
-#import "root/friends-source/friends.typ": friends
+#import "root/friends/source/friends.typ": friends
 #let title = "Friends"
 #let subtitle = "Iris finds them interesting."
 
 #let top_bar = right_top_bar([
-  #nav_link("./index.html", [Back]) | #action("theme", [Theme], label: "Theme")
+  #nav_link("../index.html", [Back]) | #action("theme", [Theme], label: "Theme")
 ])
 
 #let _avatar_block(avatar, name) = {
@@ -16,7 +16,7 @@
     )
   } else {
     image(
-      "root/friends-source/friends-assets/" + avatar,
+      "root/friends/source/friends-assets/" + avatar,
       width: 1.3cm,
       height: 1.3cm,
       alt: name,

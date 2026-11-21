@@ -27,6 +27,24 @@
   )
 }
 
+// Children stay outside the context block so they remain visible to
+// document queries; the context only yields an invisible max-size spacer.
+#let overlap(..children) = {
+  let items = children.pos()
+  box({
+    for item in items {
+      place(top + left, box(item))
+    }
+    context {
+      let sizes = items.map(measure)
+      box(
+        width: calc.max(..sizes.map(s => s.width)),
+        height: calc.max(..sizes.map(s => s.height)),
+      )
+    }
+  })
+}
+
 #let theme_color(light, dark) = {
   [#metadata((light: light.to-hex(), dark: dark.to-hex())) <driver-theme-color>]
 }
@@ -186,7 +204,7 @@
   }
 
   show figure.where(kind: image): it => {
-    _doc((t: "fig", b: it.body, cap: it.caption))
+    _doc((t: "fig", b: it.body, cap: it.caption, alt: it.alt))
     it
   }
 
